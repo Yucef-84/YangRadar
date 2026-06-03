@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { RefreshCw, Search } from "lucide-react";
-import { getDashboard, refreshStock, searchStocks } from "./api";
-import type { Dashboard, DataQuality, Stock } from "./types";
+import { RefreshCw, Search, Settings as SettingsIcon, X } from "lucide-react";
+import { getDashboard, getKiwoomSettings, refreshStock, saveKiwoomSettings, searchStocks } from "./api";
+import type { Dashboard, DataQuality, KiwoomSettings, KiwoomSettingsPayload, Stock } from "./types";
 import "./styles.css";
 
 const periods = ["5", "20", "60", "120"];
@@ -13,12 +13,23 @@ function App() {
   const [selected, setSelected] = useState("005930");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [searchQuality, setSearchQuality] = useState<DataQuality | null>(null);
+  const [settings, setSettings] = useState<KiwoomSettings | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    void loadSettings();
     void loadDashboard(selected);
   }, [selected]);
+
+  async function loadSettings() {
+    try {
+      setSettings(await getKiwoomSettings());
+    } catch {
+      setSettings(null);
+    }
+  }
 
   async function runSearch() {
     setError("");
@@ -51,6 +62,7 @@ function App() {
     try {
       await refreshStock(dashboard.stock.code);
       setDashboard(await getDashboard(dashboard.stock.code));
+      await loadSettings();
     } catch (err) {
       setError(err instanceof Error ? err.message : "갱신에 실패했습니다.");
     } finally {
@@ -76,7 +88,11 @@ function App() {
           <RefreshCw size={16} />
           갱신
         </button>
-        <StatusBadge quality={dashboard?.data_quality ?? searchQuality} />
+        <button className="action" onClick={() => setSettingsOpen(true)} title="키움 API 설정">
+          <SettingsIcon size={16} />
+          설정
+        </button>
+        <StatusBadge quality={dashboard?.data_quality ?? searchQuality} configured={settings?.configured} />
       </header>
 
       {results.length > 0 && (
@@ -91,7 +107,129 @@ function App() {
 
       {error && <div className="error">{error}</div>}
       {dashboard && <DashboardView dashboard={dashboard} loading={loading} />}
+      {settingsOpen && (
+        <SettingsDialog
+          current={settings}
+          onClose={() => setSettingsOpen(false)}
+          onSaved={async () => {
+            await loadSettings();
+            await loadDashboard(selected);
+          }}
+        />
+      )}
     </main>
+  );
+}
+
+function SettingsDialog({
+  current,
+  onClose,
+  onSaved,
+}: {
+  current: KiwoomSettings | null;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [form, setForm] = useState<KiwoomSettingsPayload>({
+    app_key: "",
+    secret_key: "",
+    account_no: current?.account_no ?? "",
+    env: current?.env ?? "real",
+    base_url: "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      await saveKiwoomSettings(form);
+      setMessage("저장했습니다. 키는 이 PC의 프로젝트 폴더 .env에만 저장됩니다.");
+      await onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "설정 저장에 실패했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <section className="settings-modal" role="dialog" aria-modal="true" aria-label="키움 API 설정">
+        <div className="modal-header">
+          <div>
+            <h2>키움 API 설정</h2>
+            <p>입력한 키는 로컬 `.env` 파일에만 저장됩니다. GitHub에는 올라가지 않습니다.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} title="닫기"><X size={18} /></button>
+        </div>
+
+        <div className="saved-state">
+          <span className={current?.configured ? "dot ok-dot" : "dot warn-dot"} />
+          {current?.configured ? "저장된 키가 있습니다." : "아직 저장된 키가 없습니다."}
+          {current?.app_key_masked && <em>앱키 {current.app_key_masked}</em>}
+        </div>
+
+        <form className="settings-form" onSubmit={(event) => void submit(event)}>
+          <label>
+            <span>앱키</span>
+            <input
+              value={form.app_key}
+              onChange={(event) => setForm({ ...form, app_key: event.target.value })}
+              placeholder="KIWOOM_APP_KEY"
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            <span>시크릿키</span>
+            <input
+              type="password"
+              value={form.secret_key}
+              onChange={(event) => setForm({ ...form, secret_key: event.target.value })}
+              placeholder="KIWOOM_SECRET_KEY"
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            <span>계좌번호</span>
+            <input
+              value={form.account_no}
+              onChange={(event) => setForm({ ...form, account_no: event.target.value })}
+              placeholder="선택 입력"
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            <span>환경</span>
+            <select value={form.env} onChange={(event) => setForm({ ...form, env: event.target.value })}>
+              <option value="real">실전(real)</option>
+              <option value="mock">모의(mock)</option>
+            </select>
+          </label>
+          <label>
+            <span>Base URL</span>
+            <input
+              value={form.base_url ?? ""}
+              onChange={(event) => setForm({ ...form, base_url: event.target.value })}
+              placeholder="비워두면 환경에 맞게 자동 선택"
+              autoComplete="off"
+            />
+          </label>
+
+          {message && <div className="settings-message">{message}</div>}
+          {error && <div className="settings-error">{error}</div>}
+
+          <div className="modal-actions">
+            <button type="button" onClick={onClose}>닫기</button>
+            <button type="submit" disabled={saving}>{saving ? "저장 중" : "로컬에 저장"}</button>
+          </div>
+        </form>
+      </section>
+    </div>
   );
 }
 
@@ -144,10 +282,10 @@ function Metric({ label, value, accent }: { label: string; value: string; accent
   );
 }
 
-function StatusBadge({ quality }: { quality: DataQuality | null | undefined }) {
+function StatusBadge({ quality, configured }: { quality: DataQuality | null | undefined; configured?: boolean }) {
   const status = quality?.connection_status ?? quality?.status;
-  const label = statusText(quality);
-  return <div className={status === "ok" ? "status ok" : "status warn"}>{label}</div>;
+  const label = configured && !quality ? "키움 API 저장됨" : statusText(quality);
+  return <div className={status === "ok" || configured ? "status ok" : "status warn"}>{label}</div>;
 }
 
 function PriceChart({ dashboard }: { dashboard: Dashboard }) {

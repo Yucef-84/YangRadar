@@ -6,18 +6,67 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+ENV_PATH = ROOT / ".env"
+KIWOOM_ENV_KEYS = [
+    "KIWOOM_APP_KEY",
+    "KIWOOM_SECRET_KEY",
+    "KIWOOM_ACCOUNT_NO",
+    "KIWOOM_ENV",
+    "KIWOOM_BASE_URL",
+]
 
 
-def load_dotenv(path: Path | None = None) -> None:
-    env_path = path or ROOT / ".env"
+def read_dotenv(path: Path | None = None) -> dict[str, str]:
+    env_path = path or ENV_PATH
+    values: dict[str, str] = {}
     if not env_path.exists():
-        return
+        return values
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def load_dotenv(path: Path | None = None) -> None:
+    for key, value in read_dotenv(path).items():
+        os.environ.setdefault(key, value)
+
+
+def save_kiwoom_settings(
+    *,
+    app_key: str,
+    secret_key: str,
+    account_no: str = "",
+    env: str = "real",
+    base_url: str = "",
+    path: Path | None = None,
+) -> None:
+    env_path = path or ENV_PATH
+    existing = read_dotenv(env_path)
+    existing.update(
+        {
+            "KIWOOM_APP_KEY": app_key.strip(),
+            "KIWOOM_SECRET_KEY": secret_key.strip(),
+            "KIWOOM_ACCOUNT_NO": account_no.strip(),
+            "KIWOOM_ENV": env.strip().lower() or "real",
+        }
+    )
+    if base_url.strip():
+        existing["KIWOOM_BASE_URL"] = base_url.strip().rstrip("/")
+    else:
+        existing.pop("KIWOOM_BASE_URL", None)
+
+    lines = [
+        "# Kiwoom REST API settings.",
+        "# Saved locally by YangRadar. Do not commit this file.",
+    ]
+    for key in KIWOOM_ENV_KEYS:
+        if key in existing:
+            lines.append(f"{key}={existing[key]}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -34,14 +83,39 @@ class Settings:
 
 
 def get_settings() -> Settings:
-    load_dotenv()
-    env = os.getenv("KIWOOM_ENV", "real").strip().lower()
+    file_values = read_dotenv()
+
+    def value(key: str, default: str = "") -> str:
+        return os.getenv(key, file_values.get(key, default)).strip()
+
+    env = value("KIWOOM_ENV", "real").lower()
     default_base_url = "https://mockapi.kiwoom.com" if env == "mock" else "https://api.kiwoom.com"
     return Settings(
-        kiwoom_app_key=os.getenv("KIWOOM_APP_KEY", "").strip(),
-        kiwoom_secret_key=os.getenv("KIWOOM_SECRET_KEY", "").strip(),
-        kiwoom_account_no=os.getenv("KIWOOM_ACCOUNT_NO", "").strip(),
+        kiwoom_app_key=value("KIWOOM_APP_KEY"),
+        kiwoom_secret_key=value("KIWOOM_SECRET_KEY"),
+        kiwoom_account_no=value("KIWOOM_ACCOUNT_NO"),
         kiwoom_env=env,
-        kiwoom_base_url=os.getenv("KIWOOM_BASE_URL", default_base_url).strip().rstrip("/"),
+        kiwoom_base_url=value("KIWOOM_BASE_URL", default_base_url).rstrip("/"),
     )
+
+
+def public_kiwoom_settings() -> dict[str, str | bool]:
+    settings = get_settings()
+    return {
+        "configured": settings.kiwoom_configured,
+        "app_key_masked": _mask(settings.kiwoom_app_key),
+        "secret_key_masked": _mask(settings.kiwoom_secret_key),
+        "account_no": settings.kiwoom_account_no,
+        "env": settings.kiwoom_env,
+        "base_url": settings.kiwoom_base_url,
+        "stored_locally": ENV_PATH.exists(),
+    }
+
+
+def _mask(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
 

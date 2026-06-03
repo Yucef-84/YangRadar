@@ -64,6 +64,24 @@ export interface DataQuality {
   messages?: string[];
 }
 
+export interface KiwoomSettings {
+  configured: boolean;
+  app_key_masked: string;
+  secret_key_masked: string;
+  account_no: string;
+  env: string;
+  base_url: string;
+  stored_locally: boolean;
+}
+
+export interface KiwoomSettingsPayload {
+  app_key: string;
+  secret_key: string;
+  account_no: string;
+  env: string;
+  base_url?: string;
+}
+
 export interface Dashboard {
   stock: Stock;
   summary: {

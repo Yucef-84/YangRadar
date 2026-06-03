@@ -11,10 +11,20 @@ Korean stock dashboard for Kiwoom REST API data.
 - Runtime data source is Kiwoom REST API.
 - Fake OHLCV, investor flow, and program-trading sample data are not shown.
 - If Kiwoom credentials are missing or an endpoint is unavailable, the UI shows a clear empty state.
+- Kiwoom REST credentials can be saved from the app settings screen to a local-only `.env` file.
 
 ## Setup
 
-Copy `.env.example` to `.env` and fill in your Kiwoom REST credentials.
+You can enter Kiwoom REST credentials directly inside the app:
+
+1. Start the backend and frontend.
+2. Open the app in the browser.
+3. Click `설정` in the top bar.
+4. Enter `앱키`, `시크릿키`, optional `계좌번호`, then click `저장`.
+
+The app stores credentials only in the local project `.env` file on this PC. `.env` is ignored by Git, so it is not pushed to GitHub.
+
+You can also create `.env` manually if you prefer:
 
 ```powershell
 Copy-Item .env.example .env
@@ -56,6 +66,8 @@ Open the Vite URL, usually `http://127.0.0.1:5173`.
 
 - `GET /api/health`
 - `GET /api/search?q=삼성전자`
+- `GET /api/settings/kiwoom`
+- `POST /api/settings/kiwoom`
 - `POST /api/stocks/{code}/refresh`
 - `GET /api/stocks/{code}/dashboard?lookback=180`
 

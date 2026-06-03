@@ -17,7 +17,7 @@ button, input { font: inherit; }
 
 .topbar {
   display: grid;
-  grid-template-columns: 140px minmax(260px, 420px) 86px 180px 1fr;
+  grid-template-columns: 140px minmax(260px, 420px) 86px 86px 180px 1fr;
   gap: 6px;
   align-items: center;
   padding: 5px 6px;
@@ -49,6 +49,14 @@ button:disabled { opacity: 0.55; cursor: wait; }
   align-items: center;
   justify-content: center;
   gap: 4px;
+}
+
+.icon-button {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .status {
@@ -318,6 +326,117 @@ td:first-child, th:first-child { text-align: center; }
   border: 1px solid #b7cbe1;
   border-radius: 4px;
   font-weight: 700;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(16, 28, 42, 0.45);
+}
+
+.settings-modal {
+  width: min(620px, 100%);
+  background: #f6f8fa;
+  border: 1px solid #7f8d9d;
+  box-shadow: 0 22px 60px rgba(15, 27, 40, 0.28);
+}
+
+.modal-header {
+  display: grid;
+  grid-template-columns: 1fr 36px;
+  gap: 12px;
+  align-items: start;
+  padding: 14px 16px;
+  background: #e2e8ef;
+  border-bottom: 1px solid #b8c4d0;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.modal-header p {
+  margin: 4px 0 0;
+}
+
+.saved-state {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #d4dce5;
+}
+
+.saved-state em {
+  margin-left: auto;
+  color: #526170;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.ok-dot { background: #0b7a45; }
+.warn-dot { background: #d5a017; }
+
+.settings-form {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.settings-form label {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-form input,
+.settings-form select {
+  height: 32px;
+  border: 1px solid #9aa9b9;
+  background: #ffffff;
+  padding: 0 8px;
+}
+
+.settings-message,
+.settings-error {
+  padding: 8px 10px;
+  border: 1px solid;
+}
+
+.settings-message {
+  color: #155c33;
+  background: #e8f7ef;
+  border-color: #82c49d;
+}
+
+.settings-error {
+  color: #8b1111;
+  background: #fff0f0;
+  border-color: #d79090;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.modal-actions button {
+  height: 32px;
+  padding: 0 12px;
 }
 
 .up { color: #d31818; }
