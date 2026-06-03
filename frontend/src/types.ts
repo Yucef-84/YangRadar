@@ -82,6 +82,21 @@ export interface KiwoomSettingsPayload {
   base_url?: string;
 }
 
+export interface KiwoomAuthTest {
+  ok: boolean;
+  status: string;
+  message: string;
+  token_type?: string | null;
+  expires_dt?: string | null;
+  provider?: {
+    provider: string;
+    configured: boolean;
+    environment: string;
+    base_url: string;
+    account_configured: boolean;
+  };
+}
+
 export interface Dashboard {
   stock: Stock;
   summary: {

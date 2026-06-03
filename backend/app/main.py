@@ -75,6 +75,11 @@ def update_kiwoom_settings(payload: KiwoomSettingsPayload) -> dict[str, Any]:
     return {"ok": True, "settings": public_kiwoom_settings(), "provider": provider.status()}
 
 
+@app.post("/api/settings/kiwoom/test-auth")
+def test_kiwoom_auth() -> dict[str, Any]:
+    return provider.test_auth()
+
+
 @app.get("/api/search")
 def search(q: str = "") -> dict[str, Any]:
     query = q.strip()
@@ -114,4 +119,3 @@ def _normalize_code(code: str) -> str:
     if not normalized.isdigit() or len(normalized) != 6:
         raise HTTPException(status_code=400, detail="종목코드는 6자리 숫자여야 합니다.")
     return normalized
-

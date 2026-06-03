@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { RefreshCw, Search, Settings as SettingsIcon, X } from "lucide-react";
-import { getDashboard, getKiwoomSettings, refreshStock, saveKiwoomSettings, searchStocks } from "./api";
+import { getDashboard, getKiwoomSettings, refreshStock, saveKiwoomSettings, searchStocks, testKiwoomAuth } from "./api";
 import type { Dashboard, DataQuality, KiwoomSettings, KiwoomSettingsPayload, Stock } from "./types";
 import "./styles.css";
 
@@ -138,14 +138,17 @@ function SettingsDialog({
     base_url: "",
   });
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [authResult, setAuthResult] = useState("");
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setSaving(true);
     setError("");
     setMessage("");
+    setAuthResult("");
     try {
       await saveKiwoomSettings(form);
       setMessage("저장했습니다. 키는 이 PC의 프로젝트 폴더 .env에만 저장됩니다.");
@@ -154,6 +157,22 @@ function SettingsDialog({
       setError(err instanceof Error ? err.message : "설정 저장에 실패했습니다.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function runAuthTest() {
+    setTesting(true);
+    setError("");
+    setAuthResult("");
+    try {
+      const result = await testKiwoomAuth();
+      const provider = result.provider;
+      const target = provider ? `${provider.environment} ${provider.base_url}` : "";
+      setAuthResult(`${result.ok ? "성공" : "실패"}: ${result.message}${target ? ` (${target})` : ""}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "키움 REST 인증 테스트에 실패했습니다.");
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -172,36 +191,21 @@ function SettingsDialog({
           <span className={current?.configured ? "dot ok-dot" : "dot warn-dot"} />
           {current?.configured ? "저장된 키가 있습니다." : "아직 저장된 키가 없습니다."}
           {current?.app_key_masked && <em>앱키 {current.app_key_masked}</em>}
+          {current?.base_url && <em>{current.env} {current.base_url}</em>}
         </div>
 
         <form className="settings-form" onSubmit={(event) => void submit(event)}>
           <label>
             <span>앱키</span>
-            <input
-              value={form.app_key}
-              onChange={(event) => setForm({ ...form, app_key: event.target.value })}
-              placeholder="KIWOOM_APP_KEY"
-              autoComplete="off"
-            />
+            <input value={form.app_key} onChange={(event) => setForm({ ...form, app_key: event.target.value })} placeholder="KIWOOM_APP_KEY" autoComplete="off" />
           </label>
           <label>
             <span>시크릿키</span>
-            <input
-              type="password"
-              value={form.secret_key}
-              onChange={(event) => setForm({ ...form, secret_key: event.target.value })}
-              placeholder="KIWOOM_SECRET_KEY"
-              autoComplete="off"
-            />
+            <input type="password" value={form.secret_key} onChange={(event) => setForm({ ...form, secret_key: event.target.value })} placeholder="KIWOOM_SECRET_KEY" autoComplete="off" />
           </label>
           <label>
             <span>계좌번호</span>
-            <input
-              value={form.account_no}
-              onChange={(event) => setForm({ ...form, account_no: event.target.value })}
-              placeholder="선택 입력"
-              autoComplete="off"
-            />
+            <input value={form.account_no} onChange={(event) => setForm({ ...form, account_no: event.target.value })} placeholder="선택 입력" autoComplete="off" />
           </label>
           <label>
             <span>환경</span>
@@ -212,19 +216,18 @@ function SettingsDialog({
           </label>
           <label>
             <span>Base URL</span>
-            <input
-              value={form.base_url ?? ""}
-              onChange={(event) => setForm({ ...form, base_url: event.target.value })}
-              placeholder="비워두면 환경에 맞게 자동 선택"
-              autoComplete="off"
-            />
+            <input value={form.base_url ?? ""} onChange={(event) => setForm({ ...form, base_url: event.target.value })} placeholder="비우면 환경에 맞게 자동 선택" autoComplete="off" />
           </label>
 
           {message && <div className="settings-message">{message}</div>}
+          {authResult && <div className={authResult.startsWith("성공") ? "settings-message" : "settings-error"}>{authResult}</div>}
           {error && <div className="settings-error">{error}</div>}
 
           <div className="modal-actions">
             <button type="button" onClick={onClose}>닫기</button>
+            <button type="button" onClick={() => void runAuthTest()} disabled={testing || !current?.configured}>
+              {testing ? "테스트 중" : "저장된 키 인증 테스트"}
+            </button>
             <button type="submit" disabled={saving}>{saving ? "저장 중" : "로컬에 저장"}</button>
           </div>
         </form>
@@ -267,7 +270,7 @@ function Summary({ dashboard }: { dashboard: Dashboard }) {
       <Metric label="회전률" value={summary.turnover_rate == null ? "-" : `${summary.turnover_rate}%`} />
       <div className="description">
         <strong>{statusText(data_quality)}</strong>
-        <span>{summary.description}</span>
+        <span>{dashboard.data_quality.messages?.[0] ?? summary.description}</span>
       </div>
     </section>
   );
@@ -308,10 +311,7 @@ function PriceChart({ dashboard }: { dashboard: Dashboard }) {
           return (
             <div className="candle-slot" key={row.date} title={`${row.date} ${fmt(row.close)}`}>
               <span className="wick" style={{ top: `${100 - top}%`, height: `${Math.max(top - bottom, 1)}%` }} />
-              <span
-                className={up ? "body up-bg" : "body down-bg"}
-                style={{ top: `${100 - Math.max(open, close)}%`, height: `${Math.max(Math.abs(open - close), 1.5)}%` }}
-              />
+              <span className={up ? "body up-bg" : "body down-bg"} style={{ top: `${100 - Math.max(open, close)}%`, height: `${Math.max(Math.abs(open - close), 1.5)}%` }} />
               {idx % 15 === 0 && <em>{row.date.slice(5)}</em>}
             </div>
           );
@@ -327,12 +327,7 @@ function VolumeBars({ rows }: { rows: Dashboard["ohlcv"] }) {
   return (
     <div className="volumes">
       {rows.map((row) => (
-        <span
-          key={row.date}
-          className={row.close >= row.open ? "up-bg" : "down-bg"}
-          style={{ height: `${Math.max((row.volume / max) * 100, 2)}%` }}
-          title={`${row.date} ${fmt(row.volume)}`}
-        />
+        <span key={row.date} className={row.close >= row.open ? "up-bg" : "down-bg"} style={{ height: `${Math.max((row.volume / max) * 100, 2)}%` }} title={`${row.date} ${fmt(row.volume)}`} />
       ))}
     </div>
   );
@@ -342,9 +337,9 @@ function IndicatorPanel({ dashboard }: { dashboard: Dashboard }) {
   if (dashboard.ohlcv.length === 0) {
     return (
       <section className="indicator-stack">
-        <EmptyPanel title="OBV" message="일봉 실데이터가 없어 계산하지 않았습니다." />
-        <EmptyPanel title="RSI 14" message="일봉 실데이터가 없어 계산하지 않았습니다." />
-        <EmptyPanel title="심리도 10" message="일봉 실데이터가 없어 계산하지 않았습니다." />
+        <EmptyPanel title="OBV" message="일봉 데이터가 없어 계산하지 않았습니다." />
+        <EmptyPanel title="RSI 14" message="일봉 데이터가 없어 계산하지 않았습니다." />
+        <EmptyPanel title="심리도 10" message="일봉 데이터가 없어 계산하지 않았습니다." />
       </section>
     );
   }
@@ -418,7 +413,7 @@ function InvestorPanel({ dashboard }: { dashboard: Dashboard }) {
         </tbody>
       </table>
       <div className="mini-note">
-        최근 5일 이탈률: 외국인 {dashboard.investor_summary.recent_outflow_5d.foreign_ratio}% · 기관 {dashboard.investor_summary.recent_outflow_5d.institution_ratio}%
+        최근 5일 이탈률 · 외국인 {dashboard.investor_summary.recent_outflow_5d.foreign_ratio}% · 기관 {dashboard.investor_summary.recent_outflow_5d.institution_ratio}%
       </div>
     </section>
   );
@@ -432,9 +427,7 @@ function ProgramPanel({ dashboard }: { dashboard: Dashboard }) {
     <section className="panel program">
       <div className="panel-title">프로그램매매 비차익 추이</div>
       <div className="program-summary">
-        {periods.map((period) => (
-          <span key={period}>{period}일 {fmt(dashboard.program_summary[period].net_amount_m)}백만</span>
-        ))}
+        {periods.map((period) => <span key={period}>{period}일 {fmt(dashboard.program_summary[period].net_amount_m)}백만</span>)}
       </div>
       <table>
         <thead>
@@ -492,13 +485,14 @@ function statusText(quality: DataQuality | null | undefined) {
 
 function panelMessage(quality: DataQuality, key: keyof DataQuality) {
   const status = quality[key];
+  if (quality.messages?.[0]) return quality.messages[0];
   if (status === "api_not_configured") return "키움 REST API 키가 없어 실데이터를 요청하지 않았습니다.";
-  if (status === "auth_failed") return "키움 REST 인증에 실패했습니다. .env의 앱키/시크릿키를 확인하세요.";
+  if (status === "auth_failed") return "키움 REST 인증에 실패했습니다. 설정창의 인증 테스트로 원문 오류를 확인하세요.";
   if (status === "token_expired") return "키움 접근토큰이 만료되었습니다. 다시 갱신해 주세요.";
   if (status === "network_error") return "키움 REST 서버에 연결하지 못했습니다.";
   if (status === "rate_limited") return "키움 REST 요청 제한에 걸렸습니다.";
   if (status === "unavailable") return "키움 REST 응답에서 이 항목을 가져오지 못했습니다.";
-  return quality.messages?.[0] ?? "실데이터가 수신되지 않았습니다.";
+  return "실데이터가 수신되지 않았습니다.";
 }
 
 function scale(value: number, min: number, max: number) {

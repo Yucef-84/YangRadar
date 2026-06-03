@@ -35,6 +35,29 @@ class KiwoomRestProvider:
             "account_configured": bool(self.settings.kiwoom_account_no),
         }
 
+    def test_auth(self) -> dict[str, Any]:
+        if not self.configured:
+            return {
+                "ok": False,
+                "status": "api_not_configured",
+                "message": "Kiwoom REST API credentials are not saved.",
+                "provider": self.status(),
+            }
+        self._token = None
+        self._token_expires_at = None
+        try:
+            data = self._request_token()
+        except KiwoomApiError as exc:
+            return {"ok": False, "status": exc.code, "message": exc.message, "provider": self.status()}
+        return {
+            "ok": True,
+            "status": "ok",
+            "message": data.get("return_msg") or "Kiwoom REST authentication succeeded.",
+            "token_type": data.get("token_type"),
+            "expires_dt": data.get("expires_dt"),
+            "provider": self.status(),
+        }
+
     def list_stocks(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not self.configured:
             return LOCAL_STOCKS, self._quality("stock_list", "api_not_configured", "키움 REST API 키가 설정되지 않아 로컬 종목 목록만 사용합니다.")
@@ -245,6 +268,32 @@ class KiwoomRestProvider:
                 break
         return themes
 
+    def _request_token(self) -> dict[str, Any]:
+        try:
+            response = requests.post(
+                f"{self.settings.kiwoom_base_url}/oauth2/token",
+                json={
+                    "grant_type": "client_credentials",
+                    "appkey": self.settings.kiwoom_app_key,
+                    "secretkey": self.settings.kiwoom_secret_key,
+                },
+                headers={"Content-Type": "application/json;charset=UTF-8", "api-id": "au10001"},
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            raise KiwoomApiError("network_error", f"Kiwoom token request failed: {exc}") from exc
+        data = _response_json(response)
+        if response.status_code >= 400 or str(data.get("return_code", "0")) not in {"0", ""}:
+            return_code = data.get("return_code")
+            return_msg = data.get("return_msg") or data.get("message")
+            details = [f"HTTP {response.status_code}"]
+            if return_code not in (None, ""):
+                details.append(f"return_code={return_code}")
+            if return_msg:
+                details.append(str(return_msg))
+            raise KiwoomApiError("auth_failed", " / ".join(details))
+        return data
+
     def _token_value(self) -> str:
         if self._token and self._token_expires_at and self._token_expires_at > datetime.now() + timedelta(minutes=5):
             return self._token
@@ -351,6 +400,9 @@ class DataProvider:
 
     def status(self) -> dict[str, Any]:
         return self.kiwoom.status()
+
+    def test_auth(self) -> dict[str, Any]:
+        return self.kiwoom.test_auth()
 
 
 def _response_json(response: requests.Response) -> dict[str, Any]:

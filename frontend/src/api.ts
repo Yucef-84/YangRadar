@@ -1,4 +1,4 @@
-import type { Dashboard, KiwoomSettings, KiwoomSettingsPayload, SearchResponse } from "./types";
+import type { Dashboard, KiwoomAuthTest, KiwoomSettings, KiwoomSettingsPayload, SearchResponse } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8001";
 
@@ -36,3 +36,9 @@ export async function saveKiwoomSettings(payload: KiwoomSettingsPayload): Promis
   return body.settings;
 }
 
+export async function testKiwoomAuth(): Promise<KiwoomAuthTest> {
+  const response = await fetch(`${API_BASE}/api/settings/kiwoom/test-auth`, { method: "POST" });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail ?? "키움 REST 인증 테스트에 실패했습니다.");
+  return body;
+}
