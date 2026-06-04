@@ -19,7 +19,9 @@
 
 ## 실행 준비
 
-`.env.example` 파일을 `.env`로 복사한 뒤 키움 REST API 정보를 입력합니다.
+키움 REST API 키는 앱 상단의 `설정` 버튼에서 입력할 수 있습니다. 입력한 키는 이 PC의 프로젝트 폴더 `.env` 파일에만 저장되며 GitHub에는 올라가지 않습니다.
+
+수동으로 설정하려면 `.env.example` 파일을 `.env`로 복사한 뒤 키움 REST API 정보를 입력합니다.
 
 ```powershell
 Copy-Item .env.example .env
@@ -84,6 +86,9 @@ Get-CimInstance Win32_Process |
 
 - `GET /api/health`
 - `GET /api/search?q=삼성전자`
+- `GET /api/settings/kiwoom`
+- `POST /api/settings/kiwoom`
+- `POST /api/settings/kiwoom/test-auth`
 - `POST /api/stocks/{code}/refresh`
 - `GET /api/stocks/{code}/dashboard?lookback=300&timeframe=daily`
 

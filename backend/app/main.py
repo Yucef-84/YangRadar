@@ -5,14 +5,25 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
+from .config import public_kiwoom_settings, save_kiwoom_settings
 from .database import get_cached_dashboard, get_cached_stock, init_db, save_dashboard, search_cached_stocks, upsert_stocks
 from .services.dashboard import enrich_dashboard
 from .services.data_provider import DataProvider
 
 
-app = FastAPI(title="YangRadar API", version="0.2.0")
+app = FastAPI(title="YangRadar API", version="0.3.0")
 provider = DataProvider()
+
+
+class KiwoomSettingsPayload(BaseModel):
+    app_key: str = Field(default="")
+    secret_key: str = Field(default="")
+    account_no: str = ""
+    env: str = "real"
+    base_url: str = ""
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +49,35 @@ def startup() -> None:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {"status": "ok", "provider": provider.status()}
+
+
+@app.get("/api/settings/kiwoom")
+def get_kiwoom_settings() -> dict[str, Any]:
+    return public_kiwoom_settings()
+
+
+@app.post("/api/settings/kiwoom")
+def update_kiwoom_settings(payload: KiwoomSettingsPayload) -> dict[str, Any]:
+    global provider
+    env = payload.env.strip().lower() or "real"
+    if env not in {"real", "mock"}:
+        raise HTTPException(status_code=400, detail="KIWOOM_ENV는 real 또는 mock이어야 합니다.")
+    if not payload.app_key.strip() or not payload.secret_key.strip():
+        raise HTTPException(status_code=400, detail="앱키와 시크릿키를 모두 입력해야 합니다.")
+    save_kiwoom_settings(
+        app_key=payload.app_key,
+        secret_key=payload.secret_key,
+        account_no=payload.account_no,
+        env=env,
+        base_url=payload.base_url,
+    )
+    provider = DataProvider()
+    return {"ok": True, "settings": public_kiwoom_settings(), "provider": provider.status()}
+
+
+@app.post("/api/settings/kiwoom/test-auth")
+def test_kiwoom_auth() -> dict[str, Any]:
+    return provider.test_auth()
 
 
 @app.get("/api/search")
