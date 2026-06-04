@@ -36,6 +36,13 @@ export interface ProgramRow {
   net_amount_m: number;
 }
 
+export interface MarketAdrRow {
+  date: string;
+  advances: number;
+  declines: number;
+  adr: number;
+}
+
 export interface Theme {
   code: string;
   name: string;
@@ -58,6 +65,7 @@ export interface DataQuality {
   chart_status?: string;
   investor_status?: string;
   program_status?: string;
+  adr_status?: string;
   theme_status?: string;
   status?: string;
   message?: string;
@@ -98,7 +106,9 @@ export interface Dashboard {
     days: number;
   }>;
   program_trading: ProgramRow[];
+  market_adr: MarketAdrRow[];
   themes: Theme[];
+  timeframe?: ChartTimeframe;
   data_quality: DataQuality;
 }
 
@@ -106,3 +116,5 @@ export interface SearchResponse {
   items: Stock[];
   data_quality: DataQuality;
 }
+
+export type ChartTimeframe = "daily" | "weekly" | "monthly";

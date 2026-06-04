@@ -1,24 +1,43 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { RefreshCw, Search } from "lucide-react";
+import {
+  CandlestickSeries,
+  ColorType,
+  createChart,
+  HistogramSeries,
+  LineSeries,
+  type CandlestickData,
+  type HistogramData,
+  type ISeriesApi,
+  type LineData,
+  type MouseEventParams,
+  type Time,
+} from "lightweight-charts";
 import { getDashboard, refreshStock, searchStocks } from "./api";
-import type { Dashboard, DataQuality, Stock } from "./types";
+import type { ChartTimeframe, Dashboard, DataQuality, Ohlcv, Stock } from "./types";
 import "./styles.css";
 
 const periods = ["5", "20", "60", "120"];
+const chartTimeframes: Array<{ value: ChartTimeframe; label: string; lookback: number }> = [
+  { value: "daily", label: "일봉", lookback: 300 },
+  { value: "weekly", label: "주봉", lookback: 300 },
+  { value: "monthly", label: "월봉", lookback: 240 },
+];
 
 function App() {
   const [query, setQuery] = useState("삼성전자");
   const [results, setResults] = useState<Stock[]>([]);
   const [selected, setSelected] = useState("005930");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [timeframe, setTimeframe] = useState<ChartTimeframe>("daily");
   const [searchQuality, setSearchQuality] = useState<DataQuality | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    void loadDashboard(selected);
-  }, [selected]);
+    void loadDashboard(selected, timeframe);
+  }, [selected, timeframe]);
 
   async function runSearch() {
     setError("");
@@ -32,11 +51,12 @@ function App() {
     }
   }
 
-  async function loadDashboard(code: string) {
+  async function loadDashboard(code: string, nextTimeframe = timeframe) {
     setLoading(true);
     setError("");
     try {
-      setDashboard(await getDashboard(code));
+      const config = chartTimeframes.find((item) => item.value === nextTimeframe) ?? chartTimeframes[0];
+      setDashboard(await getDashboard(code, nextTimeframe, config.lookback));
     } catch (err) {
       setError(err instanceof Error ? err.message : "대시보드 로딩 중 오류가 발생했습니다.");
     } finally {
@@ -50,7 +70,7 @@ function App() {
     setError("");
     try {
       await refreshStock(dashboard.stock.code);
-      setDashboard(await getDashboard(dashboard.stock.code));
+      await loadDashboard(dashboard.stock.code, timeframe);
     } catch (err) {
       setError(err instanceof Error ? err.message : "갱신에 실패했습니다.");
     } finally {
@@ -90,27 +110,92 @@ function App() {
       )}
 
       {error && <div className="error">{error}</div>}
-      {dashboard && <DashboardView dashboard={dashboard} loading={loading} />}
+      {dashboard && <DashboardView dashboard={dashboard} loading={loading} timeframe={timeframe} onTimeframeChange={setTimeframe} />}
     </main>
   );
 }
 
-function DashboardView({ dashboard, loading }: { dashboard: Dashboard; loading: boolean }) {
+function DashboardView({
+  dashboard,
+  loading,
+  timeframe,
+  onTimeframeChange,
+}: {
+  dashboard: Dashboard;
+  loading: boolean;
+  timeframe: ChartTimeframe;
+  onTimeframeChange: (timeframe: ChartTimeframe) => void;
+}) {
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const [rightWidth, setRightWidth] = useState(550);
+  const [chartHeight, setChartHeight] = useState(465);
+  const [themeHeight, setThemeHeight] = useState(112);
+  const [investorHeight, setInvestorHeight] = useState(205);
+
+  function startColumnResize(event: React.PointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    const grid = gridRef.current;
+    if (!grid) return;
+    const bounds = grid.getBoundingClientRect();
+    const onMove = (moveEvent: PointerEvent) => {
+      const width = bounds.right - moveEvent.clientX;
+      setRightWidth(clamp(width, 380, Math.max(bounds.width - 520, 380)));
+    };
+    listenForDrag(onMove);
+  }
+
+  function startHeightResize(setter: React.Dispatch<React.SetStateAction<number>>, min: number, max: number) {
+    return (event: React.PointerEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      const startY = event.clientY;
+      setter((startHeight) => {
+        const onMove = (moveEvent: PointerEvent) => setter(clamp(startHeight + moveEvent.clientY - startY, min, max));
+        listenForDrag(onMove);
+        return startHeight;
+      });
+    };
+  }
+
   return (
     <section className={loading ? "dashboard busy" : "dashboard"}>
       <Summary dashboard={dashboard} />
-      <div className="grid">
+      <div className="grid" ref={gridRef} style={{ gridTemplateColumns: `minmax(520px, 1fr) 8px ${rightWidth}px` }}>
         <div className="left-pane">
-          <PriceChart dashboard={dashboard} />
+          <PriceChart dashboard={dashboard} height={chartHeight} timeframe={timeframe} onTimeframeChange={onTimeframeChange} />
+          <ResizeBar direction="horizontal" label="차트 높이 조절" onPointerDown={startHeightResize(setChartHeight, 320, 780)} />
           <IndicatorPanel dashboard={dashboard} />
+          <DailyTradingPanel dashboard={dashboard} />
         </div>
-        <aside className="right-pane">
-          <ThemePanel dashboard={dashboard} />
-          <InvestorPanel dashboard={dashboard} />
-          <ProgramPanel dashboard={dashboard} />
+        <ResizeBar direction="vertical" label="좌우 폭 조절" onPointerDown={startColumnResize} />
+        <aside className="right-pane" style={{ gridTemplateRows: `${themeHeight}px 8px ${investorHeight}px 8px minmax(360px, auto)` }}>
+          <div className="right-slot"><ThemePanel dashboard={dashboard} /></div>
+          <ResizeBar direction="horizontal" label="종목 설명 높이 조절" onPointerDown={startHeightResize(setThemeHeight, 86, 260)} />
+          <div className="right-slot"><InvestorPanel dashboard={dashboard} /></div>
+          <ResizeBar direction="horizontal" label="수급 패널 높이 조절" onPointerDown={startHeightResize(setInvestorHeight, 150, 420)} />
+          <div className="right-slot program-slot"><ProgramPanel dashboard={dashboard} /></div>
         </aside>
       </div>
     </section>
+  );
+}
+
+function ResizeBar({
+  direction,
+  label,
+  onPointerDown,
+}: {
+  direction: "vertical" | "horizontal";
+  label: string;
+  onPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`resize-bar ${direction}`}
+      aria-label={label}
+      title={label}
+      onPointerDown={onPointerDown}
+    />
   );
 }
 
@@ -150,71 +235,192 @@ function StatusBadge({ quality }: { quality: DataQuality | null | undefined }) {
   return <div className={status === "ok" ? "status ok" : "status warn"}>{label}</div>;
 }
 
-function PriceChart({ dashboard }: { dashboard: Dashboard }) {
+function PriceChart({
+  dashboard,
+  height,
+  timeframe,
+  onTimeframeChange,
+}: {
+  dashboard: Dashboard;
+  height: number;
+  timeframe: ChartTimeframe;
+  onTimeframeChange: (timeframe: ChartTimeframe) => void;
+}) {
   if (dashboard.ohlcv.length === 0) {
-    return <EmptyPanel title="일봉 차트" message={panelMessage(dashboard.data_quality, "chart_status")} />;
+    return <EmptyPanel title={`${timeframeLabel(timeframe)} 차트`} message={panelMessage(dashboard.data_quality, "chart_status")} />;
   }
-  const max = Math.max(...dashboard.ohlcv.map((row) => row.high));
-  const min = Math.min(...dashboard.ohlcv.map((row) => row.low));
-  const candles = dashboard.ohlcv.slice(-90);
   return (
-    <section className="panel chart-panel">
-      <div className="panel-title">일봉 차트 · MA 5/10/20/60/120</div>
-      <div className="candles">
-        {candles.map((row, idx) => {
-          const top = scale(row.high, min, max);
-          const bottom = scale(row.low, min, max);
-          const open = scale(row.open, min, max);
-          const close = scale(row.close, min, max);
-          const up = row.close >= row.open;
-          return (
-            <div className="candle-slot" key={row.date} title={`${row.date} ${fmt(row.close)}`}>
-              <span className="wick" style={{ top: `${100 - top}%`, height: `${Math.max(top - bottom, 1)}%` }} />
-              <span
-                className={up ? "body up-bg" : "body down-bg"}
-                style={{ top: `${100 - Math.max(open, close)}%`, height: `${Math.max(Math.abs(open - close), 1.5)}%` }}
-              />
-              {idx % 15 === 0 && <em>{row.date.slice(5)}</em>}
-            </div>
-          );
-        })}
+    <section className="panel chart-panel" style={{ height }}>
+      <div className="panel-title chart-title">
+        <span>{timeframeLabel(timeframe)} 차트 · MA 5/10/20/60/120 · 과거 {dashboard.ohlcv.length}개</span>
+        <div className="timeframe-tabs">
+          {chartTimeframes.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              className={timeframe === item.value ? "active" : ""}
+              onClick={() => onTimeframeChange(item.value)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <span className="chart-legend">
+          <i className="ma5" />5 <i className="ma10" />10 <i className="ma20" />20 <i className="ma60" />60 <i className="ma120" />120
+        </span>
       </div>
-      <VolumeBars rows={candles} />
+      <TradingChart dashboard={dashboard} />
     </section>
   );
 }
 
-function VolumeBars({ rows }: { rows: Dashboard["ohlcv"] }) {
-  const max = Math.max(...rows.map((row) => row.volume), 1);
+function TradingChart({ dashboard }: { dashboard: Dashboard }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    const tooltip = tooltipRef.current;
+    if (!container || !tooltip) return;
+
+    const chart = createChart(container, {
+      autoSize: true,
+      layout: {
+        background: { type: ColorType.Solid, color: "#f6f8fa" },
+        textColor: "#2b3c4d",
+        fontFamily: "\"Malgun Gothic\", \"Segoe UI\", sans-serif",
+        fontSize: 12,
+      },
+      grid: {
+        vertLines: { color: "#d4dde7" },
+        horzLines: { color: "#d4dde7" },
+      },
+      rightPriceScale: {
+        borderColor: "#a9b7c6",
+        scaleMargins: { top: 0.08, bottom: 0.28 },
+      },
+      timeScale: {
+        borderColor: "#a9b7c6",
+        timeVisible: false,
+        secondsVisible: false,
+        rightOffset: 8,
+        barSpacing: 8,
+      },
+      crosshair: {
+        mode: 1,
+        vertLine: { color: "#5f7287", labelBackgroundColor: "#315f99" },
+        horzLine: { color: "#5f7287", labelBackgroundColor: "#315f99" },
+      },
+      localization: {
+        priceFormatter: (price: number) => price.toLocaleString("ko-KR"),
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
+      },
+    });
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: "#e12424",
+      downColor: "#1268c4",
+      borderUpColor: "#e12424",
+      borderDownColor: "#1268c4",
+      wickUpColor: "#26384b",
+      wickDownColor: "#26384b",
+    });
+    const volumeSeries = chart.addSeries(HistogramSeries, {
+      priceFormat: { type: "volume" },
+      priceScaleId: "",
+      color: "#7f97b0",
+    });
+    volumeSeries.priceScale().applyOptions({
+      scaleMargins: { top: 0.78, bottom: 0 },
+    });
+
+    const rows = dashboard.ohlcv;
+    const candleData: CandlestickData<Time>[] = rows.map((row) => ({
+      time: row.date,
+      open: row.open,
+      high: row.high,
+      low: row.low,
+      close: row.close,
+    }));
+    const volumeData: HistogramData<Time>[] = rows.map((row) => ({
+      time: row.date,
+      value: row.volume,
+      color: row.close >= row.open ? "rgba(225, 36, 36, 0.82)" : "rgba(18, 104, 196, 0.82)",
+    }));
+
+    candleSeries.setData(candleData);
+    volumeSeries.setData(volumeData);
+
+    const maSeries = [
+      addMaLine(chart, "#d87b00", 1),
+      addMaLine(chart, "#7f52c7", 1),
+      addMaLine(chart, "#0b8f72", 1),
+      addMaLine(chart, "#4d74c8", 2),
+      addMaLine(chart, "#7d8792", 2),
+    ];
+    [5, 10, 20, 60, 120].forEach((window, index) => {
+      maSeries[index].setData(toLineData(rows, dashboard.indicators.ma[String(window)] ?? []));
+    });
+
+    const crosshairHandler = (param: MouseEventParams<Time>) => {
+      if (!param.point || !param.time || param.point.x < 0 || param.point.y < 0) {
+        tooltip.classList.remove("visible");
+        return;
+      }
+      const candle = param.seriesData.get(candleSeries) as CandlestickData<Time> | undefined;
+      const volume = param.seriesData.get(volumeSeries) as HistogramData<Time> | undefined;
+      if (!candle) {
+        tooltip.classList.remove("visible");
+        return;
+      }
+      const date = typeof param.time === "string" ? param.time : String(param.time);
+      tooltip.innerHTML = `
+        <strong>${date}</strong>
+        <span>시 ${fmt(candle.open)} · 고 ${fmt(candle.high)} · 저 ${fmt(candle.low)} · 종 ${fmt(candle.close)}</span>
+        <span>거래량 ${fmt(volume?.value)} · 거래대금 ${money(rowByDate(rows, date)?.trading_value)}</span>
+      `;
+      const left = Math.min(Math.max(param.point.x + 14, 8), container.clientWidth - 270);
+      const top = Math.min(Math.max(param.point.y + 14, 8), container.clientHeight - 78);
+      tooltip.style.transform = `translate(${left}px, ${top}px)`;
+      tooltip.classList.add("visible");
+    };
+    chart.subscribeCrosshairMove(crosshairHandler);
+    chart.timeScale().fitContent();
+
+    return () => {
+      chart.unsubscribeCrosshairMove(crosshairHandler);
+      chart.remove();
+    };
+  }, [dashboard]);
+
   return (
-    <div className="volumes">
-      {rows.map((row) => (
-        <span
-          key={row.date}
-          className={row.close >= row.open ? "up-bg" : "down-bg"}
-          style={{ height: `${Math.max((row.volume / max) * 100, 2)}%` }}
-          title={`${row.date} ${fmt(row.volume)}`}
-        />
-      ))}
+    <div className="trading-chart-wrap">
+      <div className="trading-chart" ref={containerRef} />
+      <div className="chart-tooltip" ref={tooltipRef} />
     </div>
   );
 }
 
 function IndicatorPanel({ dashboard }: { dashboard: Dashboard }) {
-  if (dashboard.ohlcv.length === 0) {
-    return (
-      <section className="indicator-stack">
-        <EmptyPanel title="OBV" message="일봉 실데이터가 없어 계산하지 않았습니다." />
-        <EmptyPanel title="RSI 14" message="일봉 실데이터가 없어 계산하지 않았습니다." />
-        <EmptyPanel title="심리도 10" message="일봉 실데이터가 없어 계산하지 않았습니다." />
-      </section>
-    );
-  }
+  const hasPriceData = dashboard.ohlcv.length > 0;
+  const marketAdr = dashboard.market_adr ?? [];
+  const adrValues = marketAdr.map((row) => row.adr);
   return (
     <section className="indicator-stack">
-      <Spark title="OBV" values={dashboard.indicators.obv} />
-      <Spark title="RSI 14" values={dashboard.indicators.rsi14} guide={50} />
-      <Spark title="심리도 10" values={dashboard.indicators.sentiment10} guide={50} />
+      {hasPriceData ? <Spark title="OBV" values={dashboard.indicators.obv} /> : <EmptyPanel title="OBV" message="일봉 데이터가 없어 계산하지 못했습니다." />}
+      {hasPriceData ? <Spark title="RSI 14" values={dashboard.indicators.rsi14} guide={50} /> : <EmptyPanel title="RSI 14" message="일봉 데이터가 없어 계산하지 못했습니다." />}
+      {marketAdr.length > 0 ? <Spark title="시장 ADR" values={adrValues} guide={100} /> : <EmptyPanel title="시장 ADR" message={panelMessage(dashboard.data_quality, "adr_status")} />}
+      {hasPriceData ? <Spark title="심리도 10" values={dashboard.indicators.sentiment10} guide={50} /> : <EmptyPanel title="심리도 10" message="일봉 데이터가 없어 계산하지 못했습니다." />}
     </section>
   );
 }
@@ -222,9 +428,10 @@ function IndicatorPanel({ dashboard }: { dashboard: Dashboard }) {
 function Spark({ title, values, guide }: { title: string; values: Array<number | null>; guide?: number }) {
   const valid = values.filter((value): value is number => value != null).slice(-90);
   const points = useMemo(() => sparkPoints(valid), [valid]);
+  const latest = valid.length > 0 ? valid[valid.length - 1] : undefined;
   return (
     <div className="spark panel">
-      <div className="panel-title">{title}</div>
+      <div className="panel-title">{title}{latest == null ? "" : ` · ${fmt(latest)}`}</div>
       <svg viewBox="0 0 900 90" preserveAspectRatio="none" role="img">
         {guide != null && <line x1="0" x2="900" y1="45" y2="45" className="guide" />}
         <polyline points={points} />
@@ -233,46 +440,85 @@ function Spark({ title, values, guide }: { title: string; values: Array<number |
   );
 }
 
-function ThemePanel({ dashboard }: { dashboard: Dashboard }) {
-  if (!dashboard.themes || dashboard.themes.length === 0) {
-    return <EmptyPanel title="종목 테마" message={panelMessage(dashboard.data_quality, "theme_status")} />;
+function DailyTradingPanel({ dashboard }: { dashboard: Dashboard }) {
+  if (dashboard.ohlcv.length === 0) {
+    return <EmptyPanel title="일별 거래대금" message={panelMessage(dashboard.data_quality, "chart_status")} />;
   }
+  const listedShares = dashboard.stock.listed_shares || 0;
+  return (
+    <section className="panel daily-panel">
+      <div className="panel-title">{historyLabel(dashboard.timeframe ?? "daily")} 과거 내역 · 거래대금 · 거래량 회전률</div>
+      <table>
+        <thead>
+          <tr>
+            <th>일자</th>
+            <th>종가</th>
+            <th>거래량</th>
+            <th>거래대금</th>
+            <th>회전률</th>
+          </tr>
+        </thead>
+        <tbody>
+          {dashboard.ohlcv.slice().reverse().map((row) => (
+            <tr key={row.date}>
+              <td>{row.date}</td>
+              <td>{fmt(row.close)}</td>
+              <td>{fmt(row.volume)}</td>
+              <td>{money(row.trading_value)}</td>
+              <td>{listedShares ? `${((row.volume / listedShares) * 100).toFixed(4)}%` : "-"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+function ThemePanel({ dashboard }: { dashboard: Dashboard }) {
   return (
     <section className="panel theme-panel">
-      <div className="panel-title">종목 테마</div>
+      <div className="panel-title">종목 설명 · 테마</div>
+      <p className="theme-description">{dashboard.summary.description}</p>
       <div className="theme-list">
-        {dashboard.themes.map((theme) => <span key={theme.code}>{theme.name}</span>)}
+        {dashboard.themes && dashboard.themes.length > 0
+          ? dashboard.themes.slice(0, 8).map((theme) => <span key={theme.code}>{theme.name}</span>)
+          : <span>테마 정보 없음</span>}
       </div>
     </section>
   );
 }
 
 function InvestorPanel({ dashboard }: { dashboard: Dashboard }) {
+  const recentOutflow = dashboard.investor_summary?.recent_outflow_5d ?? { foreign_ratio: 0, institution_ratio: 0 };
   if (dashboard.investors.length === 0) {
     return <EmptyPanel title="외국인/기관 누적 수급" message={panelMessage(dashboard.data_quality, "investor_status")} />;
   }
   return (
-    <section className="panel">
-      <div className="panel-title">외국인/기관 누적 수급</div>
+    <section className="panel investor-panel">
+      <div className="panel-title">외국인/기관 누적 수급 · 상장주식수 대비</div>
       <table>
         <thead>
           <tr>
             <th>기간</th>
-            <th>외국인</th>
+            <th>외국인 수량</th>
+            <th>외국인 금액</th>
             <th>비율</th>
-            <th>기관</th>
+            <th>기관 수량</th>
+            <th>기관 금액</th>
             <th>비율</th>
           </tr>
         </thead>
         <tbody>
           {periods.map((period) => {
-            const row = dashboard.investor_summary.periods[period];
+            const row = dashboard.investor_summary?.periods?.[period] ?? emptyPeriodFlow();
             return (
               <tr key={period}>
                 <td>{period}일</td>
                 <td className={row.foreign_qty >= 0 ? "up" : "down"}>{fmt(row.foreign_qty)}</td>
+                <td className={row.foreign_value >= 0 ? "up" : "down"}>{money(row.foreign_value)}</td>
                 <td>{row.foreign_ratio}%</td>
                 <td className={row.institution_qty >= 0 ? "up" : "down"}>{fmt(row.institution_qty)}</td>
+                <td className={row.institution_value >= 0 ? "up" : "down"}>{money(row.institution_value)}</td>
                 <td>{row.institution_ratio}%</td>
               </tr>
             );
@@ -280,7 +526,7 @@ function InvestorPanel({ dashboard }: { dashboard: Dashboard }) {
         </tbody>
       </table>
       <div className="mini-note">
-        최근 5일 이탈률: 외국인 {dashboard.investor_summary.recent_outflow_5d.foreign_ratio}% · 기관 {dashboard.investor_summary.recent_outflow_5d.institution_ratio}%
+        최근 5일 이탈률: 외국인 {recentOutflow.foreign_ratio}% · 기관 {recentOutflow.institution_ratio}%
       </div>
     </section>
   );
@@ -295,7 +541,7 @@ function ProgramPanel({ dashboard }: { dashboard: Dashboard }) {
       <div className="panel-title">프로그램매매 비차익 추이</div>
       <div className="program-summary">
         {periods.map((period) => (
-          <span key={period}>{period}일 {fmt(dashboard.program_summary[period].net_amount_m)}백만</span>
+          <span key={period}>{period}일 {fmt(dashboard.program_summary[period]?.net_amount_m)}백만</span>
         ))}
       </div>
       <table>
@@ -340,6 +586,18 @@ function EmptyPanel({ title, message }: { title: string; message: string }) {
   );
 }
 
+function emptyPeriodFlow() {
+  return {
+    foreign_qty: 0,
+    foreign_value: 0,
+    foreign_ratio: 0,
+    institution_qty: 0,
+    institution_value: 0,
+    institution_ratio: 0,
+    days: 0,
+  };
+}
+
 function statusText(quality: DataQuality | null | undefined) {
   const status = quality?.connection_status ?? quality?.status;
   if (!quality) return "상태 확인 중";
@@ -354,13 +612,14 @@ function statusText(quality: DataQuality | null | undefined) {
 
 function panelMessage(quality: DataQuality, key: keyof DataQuality) {
   const status = quality[key];
-  if (status === "api_not_configured") return "키움 REST API 키가 없어 실데이터를 요청하지 않았습니다.";
+  if (status === "api_not_configured") return "키움 REST API 키가 없어 데이터를 요청하지 못했습니다.";
   if (status === "auth_failed") return "키움 REST 인증에 실패했습니다. .env의 앱키/시크릿키를 확인하세요.";
   if (status === "token_expired") return "키움 접근토큰이 만료되었습니다. 다시 갱신해 주세요.";
   if (status === "network_error") return "키움 REST 서버에 연결하지 못했습니다.";
   if (status === "rate_limited") return "키움 REST 요청 제한에 걸렸습니다.";
   if (status === "unavailable") return "키움 REST 응답에서 이 항목을 가져오지 못했습니다.";
-  return quality.messages?.[0] ?? "실데이터가 수신되지 않았습니다.";
+  if (status === "api_error") return "키움 REST API가 이 항목에 오류를 반환했습니다.";
+  return quality.messages?.[0] ?? "데이터가 수신되지 않았습니다.";
 }
 
 function scale(value: number, min: number, max: number) {
@@ -387,6 +646,56 @@ function money(value: number | null | undefined) {
   if (value == null) return "-";
   if (Math.abs(value) >= 100_000_000) return `${(value / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억`;
   return fmt(value);
+}
+
+function timeframeLabel(timeframe: ChartTimeframe) {
+  if (timeframe === "weekly") return "주봉";
+  if (timeframe === "monthly") return "월봉";
+  return "일봉";
+}
+
+function historyLabel(timeframe: ChartTimeframe) {
+  if (timeframe === "weekly") return "주간";
+  if (timeframe === "monthly") return "월간";
+  return "일별";
+}
+
+function addMaLine(chart: ReturnType<typeof createChart>, color: string, lineWidth: 1 | 2): ISeriesApi<"Line", Time> {
+  return chart.addSeries(LineSeries, {
+    color,
+    lineWidth,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  });
+}
+
+function toLineData(rows: Ohlcv[], values: Array<number | null>): LineData<Time>[] {
+  const data: LineData<Time>[] = [];
+  rows.forEach((row, index) => {
+    const value = values[index];
+    if (value != null) data.push({ time: row.date, value });
+  });
+  return data;
+}
+
+function rowByDate(rows: Ohlcv[], date: string) {
+  return rows.find((row) => row.date === date);
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function listenForDrag(onMove: (event: PointerEvent) => void) {
+  const onUp = () => {
+    document.body.classList.remove("is-resizing");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  document.body.classList.add("is-resizing");
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp, { once: true });
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
