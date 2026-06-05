@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .config import public_kiwoom_settings, save_kiwoom_settings
-from .database import get_cached_dashboard, init_db, save_dashboard, search_cached_stocks, upsert_stocks
+from .database import get_cached_dashboard, get_cached_stock, init_db, save_dashboard, search_cached_stocks, upsert_stocks
 from .services.dashboard import enrich_dashboard
 from .services.data_provider import DataProvider
 
@@ -93,25 +93,42 @@ def search(q: str = "") -> dict[str, Any]:
 @app.post("/api/stocks/{code}/refresh")
 def refresh_stock(code: str) -> dict[str, Any]:
     normalized = _normalize_code(code)
-    raw = provider.build_dashboard(normalized, 180)
-    payload = enrich_dashboard(raw, 180)
+    raw = provider.build_dashboard(normalized, 300, "daily")
+    _merge_cached_stock(raw, normalized)
+    payload = enrich_dashboard(raw, 300)
     save_dashboard(normalized, payload, datetime.now().isoformat(timespec="seconds"))
     return {"ok": True, "code": normalized, "data_quality": payload["data_quality"]}
 
 
 @app.get("/api/stocks/{code}/dashboard")
-def dashboard(code: str, lookback: int = 180, cache: bool = False) -> dict[str, Any]:
+def dashboard(code: str, lookback: int = 300, timeframe: str = "daily", cache: bool = False) -> dict[str, Any]:
     normalized = _normalize_code(code)
-    lookback = max(30, min(lookback, 260))
-    if cache:
+    timeframe = _normalize_timeframe(timeframe)
+    lookback = max(30, min(lookback, _max_lookback(timeframe)))
+    if cache and timeframe == "daily":
         cached = get_cached_dashboard(normalized)
         if cached:
             cached["ohlcv"] = cached["ohlcv"][-lookback:]
             return cached
-    raw = provider.build_dashboard(normalized, lookback)
+    raw = provider.build_dashboard(normalized, lookback, timeframe)
+    _merge_cached_stock(raw, normalized)
     payload = enrich_dashboard(raw, lookback)
-    save_dashboard(normalized, payload, datetime.now().isoformat(timespec="seconds"))
+    if timeframe == "daily":
+        save_dashboard(normalized, payload, datetime.now().isoformat(timespec="seconds"))
     return payload
+
+
+def _merge_cached_stock(raw: dict[str, Any], code: str) -> None:
+    cached = get_cached_stock(code)
+    if not cached:
+        return
+    stock = raw.setdefault("stock", {})
+    for key in ["name", "market", "sector"]:
+        value = stock.get(key)
+        if value in (None, "", "UNKNOWN", "정보 없음"):
+            stock[key] = cached.get(key)
+    if not stock.get("listed_shares"):
+        stock["listed_shares"] = cached.get("listed_shares")
 
 
 def _normalize_code(code: str) -> str:
@@ -119,3 +136,18 @@ def _normalize_code(code: str) -> str:
     if not normalized.isdigit() or len(normalized) != 6:
         raise HTTPException(status_code=400, detail="종목코드는 6자리 숫자여야 합니다.")
     return normalized
+
+
+def _normalize_timeframe(timeframe: str) -> str:
+    normalized = timeframe.strip().lower()
+    if normalized not in {"daily", "weekly", "monthly"}:
+        raise HTTPException(status_code=400, detail="timeframe은 daily, weekly, monthly 중 하나여야 합니다.")
+    return normalized
+
+
+def _max_lookback(timeframe: str) -> int:
+    if timeframe == "daily":
+        return 600
+    if timeframe == "weekly":
+        return 300
+    return 240

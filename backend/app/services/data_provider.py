@@ -61,18 +61,32 @@ class KiwoomRestProvider:
     def list_stocks(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not self.configured:
             return LOCAL_STOCKS, self._quality("stock_list", "api_not_configured", "키움 REST API 키가 설정되지 않아 로컬 종목 목록만 사용합니다.")
+        market_requests = [("0", "KOSPI"), ("10", "KOSDAQ")]
+        stocks: list[dict[str, Any]] = []
+        messages: list[str] = []
         try:
-            data = self._post("/api/dostk/stkinfo", "ka10099", {"mrkt_tp": "0"})
-            stocks = self._parse_stock_list(data)
+            for market_code, fallback_market in market_requests:
+                try:
+                    data = self._post("/api/dostk/stkinfo", "ka10099", {"mrkt_tp": market_code})
+                    stocks.extend(self._parse_stock_list(data, fallback_market))
+                except KiwoomApiError as exc:
+                    messages.append(f"{fallback_market}: {exc.message}")
+
+            deduped = {stock["code"]: stock for stock in stocks}
+            stocks = sorted(deduped.values(), key=lambda item: (item["market"], item["name"], item["code"]))
             if stocks:
-                return stocks, self._quality("stock_list", "ok", "키움 REST 종목 목록을 수신했습니다.")
+                quality = self._quality("stock_list", "ok" if not messages else "partial", "키움 REST 종목 목록을 수신했습니다.")
+                if messages:
+                    quality["message"] += " 일부 시장은 실패했습니다: " + " / ".join(messages)
+                return stocks, quality
             return LOCAL_STOCKS, self._quality("stock_list", "unavailable", "키움 종목 목록 응답을 해석하지 못해 로컬 목록을 사용합니다.")
         except KiwoomApiError as exc:
             return LOCAL_STOCKS, self._quality("stock_list", exc.code, exc.message)
 
-    def dashboard(self, code: str, lookback: int) -> dict[str, Any]:
+    def dashboard(self, code: str, lookback: int, timeframe: str = "daily") -> dict[str, Any]:
         stock = local_stock(code)
         data_quality = self._base_quality()
+        timeframe = timeframe if timeframe in {"daily", "weekly", "monthly"} else "daily"
 
         if not self.configured:
             data_quality.update(
@@ -80,6 +94,7 @@ class KiwoomRestProvider:
                     "connection_status": "api_not_configured",
                     "price_status": "api_not_configured",
                     "chart_status": "api_not_configured",
+                    "adr_status": "api_not_configured",
                     "investor_status": "api_not_configured",
                     "program_status": "api_not_configured",
                     "theme_status": "api_not_configured",
@@ -93,6 +108,7 @@ class KiwoomRestProvider:
         investors: list[dict[str, Any]] = []
         program: list[dict[str, Any]] = []
         themes: list[dict[str, Any]] = []
+        market_adr: list[dict[str, Any]] = []
 
         try:
             quote = self._get_quote(code)
@@ -104,7 +120,7 @@ class KiwoomRestProvider:
             data_quality["messages"].append(exc.message)
 
         try:
-            ohlcv = self._get_daily_chart(code, lookback)
+            ohlcv = self._get_price_chart(code, lookback, timeframe)
             data_quality["chart_status"] = "ok" if ohlcv else "unavailable"
         except KiwoomApiError as exc:
             data_quality["chart_status"] = exc.code
@@ -128,7 +144,13 @@ class KiwoomRestProvider:
             themes = self._get_themes_for_stock(code)
             data_quality["theme_status"] = "ok" if themes else "unavailable"
         except KiwoomApiError as exc:
-            data_quality["theme_status"] = exc.code
+            data_quality["theme_status"] = "unavailable"
+
+        try:
+            market_adr = self._get_market_adr()
+            data_quality["adr_status"] = "ok" if market_adr else "unavailable"
+        except KiwoomApiError as exc:
+            data_quality["adr_status"] = exc.code
             data_quality["messages"].append(exc.message)
 
         data_quality["connection_status"] = "ok" if any([quote, ohlcv, investors, program, themes]) else "unavailable"
@@ -138,7 +160,9 @@ class KiwoomRestProvider:
             "ohlcv": ohlcv,
             "investors": investors,
             "program_trading": program,
+            "market_adr": market_adr,
             "themes": themes,
+            "timeframe": timeframe,
             "data_quality": data_quality,
         }
 
@@ -146,48 +170,79 @@ class KiwoomRestProvider:
         data = self._post("/api/dostk/stkinfo", "ka10001", {"stk_cd": code})
         return {
             "name": _first(data, ["stk_nm", "isu_nm", "name"]),
-            "close": _to_number(_first(data, ["cur_prc", "close_pric", "now_pric", "prpr"])),
+            "close": _to_abs_number(_first(data, ["cur_prc", "close_pric", "now_pric", "prpr"])),
             "change": _to_number(_first(data, ["pred_pre", "change", "prdy_vrss"])),
             "change_rate": _to_number(_first(data, ["flu_rt", "chg_rt", "prdy_ctrt"])),
-            "volume": _to_number(_first(data, ["trde_qty", "acc_trdvol", "volume"])),
-            "trading_value": _to_number(_first(data, ["trde_prica", "acc_trdval", "trading_value"])),
-            "listed_shares": _to_number(_first(data, ["flo_stkcnt", "lst_stkcnt", "listed_shares"])),
+            "volume": _to_abs_number(_first(data, ["trde_qty", "acc_trdvol", "volume"])),
+            "trading_value": _to_abs_number(_first(data, ["trde_prica", "acc_trdval", "trading_value"])),
+            "listed_shares": _to_abs_number(_first(data, ["flo_stkcnt", "lst_stkcnt", "listed_shares"])),
         }
 
-    def _get_daily_chart(self, code: str, lookback: int) -> list[dict[str, Any]]:
+    def _get_price_chart(self, code: str, lookback: int, timeframe: str) -> list[dict[str, Any]]:
+        api_id, row_keys = {
+            "daily": ("ka10081", ["stk_dt_pole_chart_qry", "stk_daily_chart_qry", "output", "list"]),
+            "weekly": ("ka10082", ["stk_stk_pole_chart_qry", "stk_week_chart_qry", "output", "list"]),
+            "monthly": ("ka10083", ["stk_mth_pole_chart_qry", "stk_month_chart_qry", "output", "list"]),
+        }[timeframe]
         data = self._post(
             "/api/dostk/chart",
-            "ka10081",
+            api_id,
             {"stk_cd": code, "base_dt": datetime.now().strftime("%Y%m%d"), "upd_stkpc_tp": "1"},
         )
-        rows = _find_first_list(data, ["stk_dt_pole_chart_qry", "stk_daily_chart_qry", "output", "list"])
+        rows = _find_first_list(data, row_keys)
         parsed: list[dict[str, Any]] = []
         for row in rows:
             date = _format_date(_first(row, ["dt", "date", "stck_bsop_date"]))
-            close = _to_number(_first(row, ["cur_prc", "close_pric", "stck_clpr", "close"]))
-            volume = _to_number(_first(row, ["trde_qty", "acml_vol", "volume"])) or 0
+            close = _to_abs_number(_first(row, ["cur_prc", "close_pric", "stck_clpr", "close"]))
+            volume = _to_abs_number(_first(row, ["trde_qty", "acml_vol", "volume"])) or 0
             if not date or close is None:
                 continue
             parsed.append(
                 {
                     "date": date,
-                    "open": _to_number(_first(row, ["open_pric", "stck_oprc", "open"])) or close,
-                    "high": _to_number(_first(row, ["high_pric", "stck_hgpr", "high"])) or close,
-                    "low": _to_number(_first(row, ["low_pric", "stck_lwpr", "low"])) or close,
+                    "open": _to_abs_number(_first(row, ["open_pric", "stck_oprc", "open"])) or close,
+                    "high": _to_abs_number(_first(row, ["high_pric", "stck_hgpr", "high"])) or close,
+                    "low": _to_abs_number(_first(row, ["low_pric", "stck_lwpr", "low"])) or close,
                     "close": close,
                     "volume": volume,
-                    "trading_value": _to_number(_first(row, ["trde_prica", "acml_tr_pbmn", "trading_value"])) or close * volume,
+                    "trading_value": _to_abs_number(_first(row, ["trde_prica", "acml_tr_pbmn", "trading_value"])) or close * volume,
                 }
             )
         parsed.sort(key=lambda item: item["date"])
         return parsed[-lookback:]
 
     def _get_investor_chart(self, code: str) -> list[dict[str, Any]]:
-        data = self._post(
+        qty_data = self._post(
             "/api/dostk/chart",
             "ka10060",
             {"dt": datetime.now().strftime("%Y%m%d"), "stk_cd": code, "amt_qty_tp": "2", "trde_tp": "0", "unit_tp": "1"},
         )
+        qty_rows = self._parse_investor_rows(qty_data)
+        value_rows: list[dict[str, Any]] = []
+        try:
+            value_data = self._post(
+                "/api/dostk/chart",
+                "ka10060",
+                {"dt": datetime.now().strftime("%Y%m%d"), "stk_cd": code, "amt_qty_tp": "1", "trde_tp": "0", "unit_tp": "1"},
+            )
+            value_rows = self._parse_investor_rows(value_data)
+        except KiwoomApiError:
+            value_rows = []
+
+        by_date = {row["date"]: row for row in qty_rows}
+        for row in value_rows:
+            target = by_date.setdefault(
+                row["date"],
+                {"date": row["date"], "foreign_qty": 0, "foreign_value": 0, "institution_qty": 0, "institution_value": 0},
+            )
+            target["foreign_value"] = row["foreign_qty"] or row["foreign_value"]
+            target["institution_value"] = row["institution_qty"] or row["institution_value"]
+
+        parsed = list(by_date.values())
+        parsed.sort(key=lambda item: item["date"])
+        return parsed
+
+    def _parse_investor_rows(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         rows = _find_first_list(data, ["stk_invsr_orgn_chart", "output", "list"])
         parsed: list[dict[str, Any]] = []
         for row in rows:
@@ -197,19 +252,35 @@ class KiwoomRestProvider:
             parsed.append(
                 {
                     "date": date,
-                    "foreign_qty": _to_number(_first(row, ["frgnr_netprps_qty", "for_netprps_qty", "foreign_qty"])) or 0,
-                    "foreign_value": _to_number(_first(row, ["frgnr_netprps_amt", "foreign_value"])) or 0,
-                    "institution_qty": _to_number(_first(row, ["orgn_netprps_qty", "inst_netprps_qty", "institution_qty"])) or 0,
-                    "institution_value": _to_number(_first(row, ["orgn_netprps_amt", "institution_value"])) or 0,
+                    "foreign_qty": _to_number(
+                        _first(
+                            row,
+                            ["frgnr_invsr", "frgnr_netprps_qty", "for_netprps_qty", "frgnr", "frgn", "frgnr_trde_qty", "foreign_qty"],
+                        )
+                    )
+                    or 0,
+                    "foreign_value": _to_number(
+                        _first(row, ["frgnr_netprps_amt", "frgnr_trde_amt", "for_netprps_amt", "frgn_amt", "foreign_value"])
+                    )
+                    or 0,
+                    "institution_qty": _to_number(
+                        _first(row, ["orgn", "orgn_netprps_qty", "inst_netprps_qty", "inst", "orgn_trde_qty", "institution_qty"])
+                    )
+                    or 0,
+                    "institution_value": _to_number(
+                        _first(row, ["orgn_netprps_amt", "inst_netprps_amt", "orgn_trde_amt", "inst_amt", "institution_value"])
+                    )
+                    or 0,
                 }
             )
         parsed.sort(key=lambda item: item["date"])
         return parsed
 
     def _get_program_trading(self, code: str) -> list[dict[str, Any]]:
+        today = datetime.now().strftime("%Y%m%d")
         attempts = [
-            ("/api/dostk/stkinfo", "ka90013", {"stk_cd": code}),
-            ("/api/dostk/stkinfo", "ka90004", {"stk_cd": code}),
+            ("/api/dostk/mrkcond", "ka90013", {"stk_cd": code, "date": today, "amt_qty_tp": "1"}),
+            ("/api/dostk/mrkcond", "ka90013", {"stk_cd": code, "date": today, "amt_qty_tp": "2"}),
         ]
         last_error: KiwoomApiError | None = None
         for endpoint, api_id, body in attempts:
@@ -225,21 +296,21 @@ class KiwoomRestProvider:
         return []
 
     def _parse_program_rows(self, data: dict[str, Any]) -> list[dict[str, Any]]:
-        rows = _find_first_list(data, ["stk_day_progrm_trde_trnsn", "stk_progrm_trde", "output", "list"])
+        rows = _find_first_list(data, ["stk_daly_prm_trde_trnsn", "stk_day_progrm_trde_trnsn", "stk_progrm_trde", "output", "list"])
         parsed: list[dict[str, Any]] = []
         for row in rows:
             date = _format_date(_first(row, ["dt", "date"]))
             if not date:
                 continue
-            buy = _to_number(_first(row, ["buy_amt", "buy_amount_m", "prm_buy_amt"])) or 0
-            sell = _to_number(_first(row, ["sell_amt", "sell_amount_m", "prm_sell_amt"])) or 0
-            net = _to_number(_first(row, ["netprps_amt", "net_amount_m", "prm_netprps_amt"])) or buy - sell
+            buy = _to_number(_first(row, ["buy_amt", "buy_amount_m", "prm_buy_amt", "nprft_buy_amt", "non_arbitrage_buy_amt"])) or 0
+            sell = _to_number(_first(row, ["sell_amt", "sell_amount_m", "prm_sell_amt", "nprft_sell_amt", "non_arbitrage_sell_amt"])) or 0
+            net = _to_number(_first(row, ["netprps_amt", "net_amount_m", "prm_netprps_amt", "nprft_netprps_amt", "non_arbitrage_net_amount"])) or buy - sell
             parsed.append(
                 {
                     "date": date,
-                    "close": _to_number(_first(row, ["cur_prc", "close_pric", "close"])) or 0,
+                    "close": _to_abs_number(_first(row, ["cur_prc", "close_pric", "close"])) or 0,
                     "change_rate": _to_number(_first(row, ["flu_rt", "change_rate"])),
-                    "volume": _to_number(_first(row, ["trde_qty", "volume"])) or 0,
+                    "volume": _to_abs_number(_first(row, ["trde_qty", "volume"])) or 0,
                     "sell_amount_m": sell,
                     "buy_amount_m": buy,
                     "net_amount_m": net,
@@ -249,7 +320,7 @@ class KiwoomRestProvider:
         return parsed
 
     def _get_themes_for_stock(self, code: str) -> list[dict[str, Any]]:
-        data = self._post("/api/dostk/thme", "ka90001", {})
+        data = self._post("/api/dostk/thme", "ka90001", {"qry_tp": "0", "mrkt_tp": "0"})
         rows = _find_first_list(data, ["theme_group", "thme_group", "output", "list"])
         themes: list[dict[str, Any]] = []
         for row in rows[:200]:
@@ -267,6 +338,46 @@ class KiwoomRestProvider:
             if len(themes) >= 8:
                 break
         return themes
+
+    def _get_market_adr(self) -> list[dict[str, Any]]:
+        attempts = [
+            ("/api/dostk/sect", "ka20003", {"mrkt_tp": "0", "inds_cd": "001"}),
+            ("/api/dostk/sect", "ka20003", {"mrkt_tp": "0", "inds_cd": "101"}),
+            ("/api/dostk/sect", "ka20001", {"mrkt_tp": "0", "upjong_cd": "001", "inds_cd": "001"}),
+        ]
+        last_error: KiwoomApiError | None = None
+        for endpoint, api_id, body in attempts:
+            try:
+                data = self._post(endpoint, api_id, body)
+                parsed = self._parse_adr_rows(data)
+                if parsed:
+                    return parsed[-120:]
+            except KiwoomApiError as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        return []
+
+    def _parse_adr_rows(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        rows = _find_first_list(data, ["all_inds_idex", "upjong_stkpc", "upjong_pric", "output", "list"])
+        if not rows:
+            rows = [data]
+        parsed: list[dict[str, Any]] = []
+        for idx, row in enumerate(rows):
+            advances = _to_abs_number(_first(row, ["rising", "rise_stk_cnt", "up_stk_cnt", "stk_cnt_up", "advances", "up_cnt"]))
+            declines = _to_abs_number(_first(row, ["fall", "fall_stk_cnt", "down_stk_cnt", "stk_cnt_down", "declines", "down_cnt"]))
+            if advances is None or declines is None or declines == 0:
+                continue
+            date = _format_date(_first(row, ["dt", "date", "base_dt"])) or datetime.now().strftime("%Y-%m-%d")
+            parsed.append(
+                {
+                    "date": date if len(rows) > 1 else f"{date}-{idx}",
+                    "advances": advances,
+                    "declines": declines,
+                    "adr": round(advances / declines * 100, 2),
+                }
+            )
+        return parsed
 
     def _request_token(self) -> dict[str, Any]:
         try:
@@ -297,22 +408,7 @@ class KiwoomRestProvider:
     def _token_value(self) -> str:
         if self._token and self._token_expires_at and self._token_expires_at > datetime.now() + timedelta(minutes=5):
             return self._token
-        try:
-            response = requests.post(
-                f"{self.settings.kiwoom_base_url}/oauth2/token",
-                json={
-                    "grant_type": "client_credentials",
-                    "appkey": self.settings.kiwoom_app_key,
-                    "secretkey": self.settings.kiwoom_secret_key,
-                },
-                headers={"Content-Type": "application/json;charset=UTF-8", "api-id": "au10001"},
-                timeout=10,
-            )
-        except requests.RequestException as exc:
-            raise KiwoomApiError("network_error", f"키움 토큰 요청 실패: {exc}") from exc
-        data = _response_json(response)
-        if response.status_code >= 400 or str(data.get("return_code", "0")) not in {"0", ""}:
-            raise KiwoomApiError("auth_failed", data.get("return_msg") or f"키움 인증 실패 HTTP {response.status_code}")
+        data = self._request_token()
         token = data.get("token")
         if not token:
             raise KiwoomApiError("auth_failed", "키움 토큰 응답에 token 필드가 없습니다.")
@@ -348,11 +444,11 @@ class KiwoomRestProvider:
             raise KiwoomApiError("api_error", data.get("return_msg") or f"{api_id} HTTP {response.status_code}")
         return data
 
-    def _parse_stock_list(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+    def _parse_stock_list(self, data: dict[str, Any], fallback_market: str = "KRX") -> list[dict[str, Any]]:
         rows = _find_first_list(data, ["list", "stk_info", "output", "items"])
         stocks: list[dict[str, Any]] = []
         for row in rows:
-            code = _digits(_first(row, ["stk_cd", "code", "isu_cd"]))
+            code = _stock_code(_first(row, ["stk_cd", "code", "isu_cd"]))
             name = _first(row, ["stk_nm", "name", "isu_nm"])
             if not code or not name:
                 continue
@@ -360,9 +456,9 @@ class KiwoomRestProvider:
                 {
                     "code": code.zfill(6),
                     "name": str(name),
-                    "market": str(_first(row, ["mrkt_nm", "market"]) or "KRX"),
-                    "sector": _first(row, ["upjong_nm", "sector"]),
-                    "listed_shares": _to_number(_first(row, ["list_stock_cnt", "listed_shares"])),
+                    "market": str(_first(row, ["marketName", "mrkt_nm", "market", "marketCode"]) or fallback_market),
+                    "sector": _first(row, ["upName", "upSizeName", "upjong_nm", "sector"]),
+                    "listed_shares": _to_abs_number(_first(row, ["listCount", "list_stock_cnt", "listed_shares"])),
                 }
             )
         return stocks
@@ -375,6 +471,7 @@ class KiwoomRestProvider:
             "connection_status": "unknown",
             "price_status": "unknown",
             "chart_status": "unknown",
+            "adr_status": "unknown",
             "investor_status": "unknown",
             "program_status": "unknown",
             "theme_status": "unknown",
@@ -385,7 +482,17 @@ class KiwoomRestProvider:
         return {"source": "kiwoom_rest", "scope": scope, "status": status, "message": message}
 
     def _empty_dashboard(self, stock: dict[str, Any], data_quality: dict[str, Any]) -> dict[str, Any]:
-        return {"stock": stock, "quote": {}, "ohlcv": [], "investors": [], "program_trading": [], "themes": [], "data_quality": data_quality}
+        return {
+            "stock": stock,
+            "quote": {},
+            "ohlcv": [],
+            "investors": [],
+            "program_trading": [],
+            "market_adr": [],
+            "themes": [],
+            "timeframe": "daily",
+            "data_quality": data_quality,
+        }
 
 
 class DataProvider:
@@ -395,8 +502,8 @@ class DataProvider:
     def list_stocks(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         return self.kiwoom.list_stocks()
 
-    def build_dashboard(self, code: str, lookback: int) -> dict[str, Any]:
-        return self.kiwoom.dashboard(code, lookback)
+    def build_dashboard(self, code: str, lookback: int, timeframe: str = "daily") -> dict[str, Any]:
+        return self.kiwoom.dashboard(code, lookback, timeframe)
 
     def status(self) -> dict[str, Any]:
         return self.kiwoom.status()
@@ -444,11 +551,23 @@ def _to_number(value: Any) -> float | None:
         return None
 
 
+def _to_abs_number(value: Any) -> float | None:
+    number = _to_number(value)
+    return abs(number) if number is not None else None
+
+
 def _digits(value: Any) -> str | None:
     if value in (None, ""):
         return None
     digits = "".join(ch for ch in str(value) if ch.isdigit())
     return digits or None
+
+
+def _stock_code(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    code = str(value).strip()
+    return code if code.isdigit() and len(code) == 6 else None
 
 
 def _format_date(value: Any) -> str | None:

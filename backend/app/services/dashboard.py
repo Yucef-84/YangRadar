@@ -38,6 +38,7 @@ def enrich_dashboard(raw: dict[str, Any], lookback: int) -> dict[str, Any]:
 
     investors = raw.get("investors", [])[-lookback:]
     program_rows = raw.get("program_trading", [])[-lookback:]
+    market_adr = raw.get("market_adr", [])[-lookback:]
     themes = raw.get("themes", [])
 
     return {
@@ -58,7 +59,9 @@ def enrich_dashboard(raw: dict[str, Any], lookback: int) -> dict[str, Any]:
         "investors": investors[-40:],
         "program_summary": _program_summary(program_rows),
         "program_trading": program_rows[-40:],
+        "market_adr": market_adr,
         "themes": themes,
+        "timeframe": raw.get("timeframe", "daily"),
         "data_quality": raw.get("data_quality", {}),
     }
 
