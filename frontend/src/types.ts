@@ -4,6 +4,7 @@ export interface Stock {
   market: string;
   sector?: string | null;
   listed_shares?: number | null;
+  security_type?: string | null;
 }
 
 export interface Ohlcv {
@@ -143,6 +144,64 @@ export interface Dashboard {
   themes: Theme[];
   timeframe?: ChartTimeframe;
   data_quality: DataQuality;
+}
+
+export type RankingMetric = "foreign" | "institution" | "combined";
+export type RankingDirection = "inflow" | "outflow";
+export type RankingMarket = "ALL" | "KOSPI" | "KOSDAQ";
+export type RankingAssetType = "ALL" | "STOCK" | "ETF";
+
+export interface InvestorRankingItem {
+  trade_date: string;
+  code: string;
+  name: string;
+  market: string;
+  security_type: string;
+  close: number | null;
+  market_cap: number | null;
+  listed_shares: number | null;
+  foreign_net_qty: number | null;
+  foreign_net_value: number | null;
+  institution_net_qty: number | null;
+  institution_net_value: number | null;
+  foreign_change_ratio: number | null;
+  institution_change_ratio: number | null;
+  combined_change_ratio: number | null;
+  foreign_holding_qty: number | null;
+  foreign_holding_ratio: number | null;
+  score: number;
+  rank: number;
+  previous_rank: number | null;
+  rank_change: number | null;
+}
+
+export interface InvestorRankingResponse {
+  date: string | null;
+  metric?: RankingMetric;
+  direction?: RankingDirection;
+  market?: RankingMarket;
+  asset_type?: RankingAssetType;
+  items: InvestorRankingItem[];
+  dates: string[];
+  data_quality: DataQuality;
+}
+
+export interface RankingJob {
+  status: "idle" | "running" | "completed" | "failed";
+  target_date: string | null;
+  total: number;
+  completed: number;
+  saved: number;
+  failed: number;
+  message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+}
+
+export interface InvestorRankingStatus {
+  job: RankingJob;
+  dates: string[];
 }
 
 export interface SearchResponse {

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { RefreshCw, Search, Settings as SettingsIcon, X } from "lucide-react";
+import { BarChart3, RefreshCw, Search, Settings as SettingsIcon, X } from "lucide-react";
 import {
   CandlestickSeries,
   ColorType,
@@ -14,8 +14,32 @@ import {
   type MouseEventParams,
   type Time,
 } from "lightweight-charts";
-import { getDashboard, getKiwoomSettings, refreshStock, saveKiwoomSettings, searchStocks, testKiwoomAuth } from "./api";
-import type { ChartTimeframe, Dashboard, DataQuality, KiwoomSettings, KiwoomSettingsPayload, Ohlcv, Stock } from "./types";
+import {
+  getDashboard,
+  getInvestorRanking,
+  getInvestorRankingStatus,
+  getKiwoomSettings,
+  refreshInvestorRanking,
+  refreshStock,
+  saveKiwoomSettings,
+  searchStocks,
+  testKiwoomAuth,
+} from "./api";
+import type {
+  ChartTimeframe,
+  Dashboard,
+  DataQuality,
+  InvestorRankingItem,
+  InvestorRankingStatus,
+  KiwoomSettings,
+  KiwoomSettingsPayload,
+  Ohlcv,
+  RankingAssetType,
+  RankingDirection,
+  RankingMarket,
+  RankingMetric,
+  Stock,
+} from "./types";
 import "./styles.css";
 
 const periods = ["5", "20", "60", "120"];
@@ -36,6 +60,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [view, setView] = useState<"dashboard" | "rankings">("dashboard");
 
   useEffect(() => {
     void loadSettings();
@@ -56,6 +81,7 @@ function App() {
       const response = await searchStocks(query);
       setResults(response.items);
       setSearchQuality(response.data_quality);
+      setView("dashboard");
       if (response.items[0]) setSelected(response.items[0].code);
     } catch (err) {
       setError(err instanceof Error ? err.message : "검색 중 오류가 발생했습니다.");
@@ -108,6 +134,10 @@ function App() {
           <RefreshCw size={16} />
           갱신
         </button>
+        <button className={`action ${view === "rankings" ? "active-action" : ""}`} onClick={() => setView("rankings")} title="외국인·기관 수급 순위">
+          <BarChart3 size={16} />
+          수급 순위
+        </button>
         <button className="action" onClick={() => setSettingsOpen(true)} title="키움 API 설정">
           <SettingsIcon size={16} />
           설정
@@ -115,7 +145,7 @@ function App() {
         <StatusBadge quality={dashboard?.data_quality ?? searchQuality} configured={settings?.configured} />
       </header>
 
-      {results.length > 0 && (
+      {view === "dashboard" && results.length > 0 && (
         <div className="result-strip">
           {results.map((stock) => (
             <button key={stock.code} onClick={() => setSelected(stock.code)} className={selected === stock.code ? "active" : ""}>
@@ -126,7 +156,15 @@ function App() {
       )}
 
       {error && <div className="error">{error}</div>}
-      {dashboard && <DashboardView dashboard={dashboard} loading={loading} timeframe={timeframe} onTimeframeChange={setTimeframe} />}
+      {view === "dashboard" && dashboard && <DashboardView dashboard={dashboard} loading={loading} timeframe={timeframe} onTimeframeChange={setTimeframe} />}
+      {view === "rankings" && (
+        <InvestorRankingView
+          onSelectStock={(code) => {
+            setSelected(code);
+            setView("dashboard");
+          }}
+        />
+      )}
       {settingsOpen && (
         <SettingsDialog
           current={settings}
@@ -139,6 +177,197 @@ function App() {
       )}
     </main>
   );
+}
+
+function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) => void }) {
+  const [metric, setMetric] = useState<RankingMetric>("foreign");
+  const [direction, setDirection] = useState<RankingDirection>("inflow");
+  const [market, setMarket] = useState<RankingMarket>("ALL");
+  const [assetType, setAssetType] = useState<RankingAssetType>("ALL");
+  const [date, setDate] = useState("");
+  const [response, setResponse] = useState<Awaited<ReturnType<typeof getInvestorRanking>> | null>(null);
+  const [jobStatus, setJobStatus] = useState<InvestorRankingStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  async function loadStatus() {
+    try {
+      setJobStatus(await getInvestorRankingStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "수급 수집 상태를 불러오지 못했습니다.");
+    }
+  }
+
+  async function loadRanking() {
+    setLoading(true);
+    setError("");
+    try {
+      const next = await getInvestorRanking({ date: date || undefined, metric, direction, market, assetType });
+      setResponse(next);
+      if (!date && next.date) setDate(next.date);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "수급 순위를 불러오지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadStatus();
+  }, []);
+
+  useEffect(() => {
+    void loadRanking();
+  }, [date, metric, direction, market, assetType]);
+
+  useEffect(() => {
+    if (jobStatus?.job.status !== "running") return;
+    const timer = window.setInterval(() => {
+      void getInvestorRankingStatus().then((next) => {
+        setJobStatus(next);
+        if (next.job.status !== "running") void loadRanking();
+      }).catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [jobStatus?.job.status]);
+
+  async function handleRefresh() {
+    setRefreshing(true);
+    setError("");
+    try {
+      await refreshInvestorRanking(date || undefined);
+      await loadStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "전체 수급 갱신을 시작하지 못했습니다.");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const job = jobStatus?.job;
+  const items = response?.items ?? [];
+  const dataQuality = response?.data_quality;
+  const statusMessage = job?.status === "running"
+    ? `${job.message ?? "수집 중"} (${job.completed.toLocaleString("ko-KR")}/${job.total.toLocaleString("ko-KR")})`
+    : job?.message ?? dataQuality?.message ?? "전체 종목 일별 수급 데이터가 없습니다.";
+
+  return (
+    <section className="ranking-view">
+      <div className="ranking-heading panel">
+        <div>
+          <h1>외국인·기관 수급 순위</h1>
+          <p>시총 대비 일일 보유변동률 · 전체 종목 및 ETF</p>
+        </div>
+        <div className={`ranking-job ${job?.status === "running" ? "running" : ""}`}>
+          <span>{statusMessage}</span>
+          <button type="button" onClick={() => void handleRefresh()} disabled={refreshing || job?.status === "running"}>
+            {refreshing || job?.status === "running" ? "수집 중" : "전체 수급 갱신"}
+          </button>
+        </div>
+      </div>
+
+      <div className="ranking-filters panel">
+        <label><span>기준일</span><select value={date} onChange={(event) => setDate(event.target.value)}>
+          <option value="">최신 거래일</option>
+          {(response?.dates ?? jobStatus?.dates ?? []).map((item) => <option key={item} value={item}>{item}</option>)}
+        </select></label>
+        <label><span>지표</span><select value={metric} onChange={(event) => setMetric(event.target.value as RankingMetric)}>
+          <option value="foreign">외국인</option>
+          <option value="institution">기관</option>
+          <option value="combined">외국인+기관</option>
+        </select></label>
+        <label><span>방향</span><select value={direction} onChange={(event) => setDirection(event.target.value as RankingDirection)}>
+          <option value="inflow">순유입 TOP 100</option>
+          <option value="outflow">순유출 TOP 100</option>
+        </select></label>
+        <label><span>시장</span><select value={market} onChange={(event) => setMarket(event.target.value as RankingMarket)}>
+          <option value="ALL">전체 시장</option>
+          <option value="KOSPI">KOSPI</option>
+          <option value="KOSDAQ">KOSDAQ</option>
+        </select></label>
+        <label><span>종목 유형</span><select value={assetType} onChange={(event) => setAssetType(event.target.value as RankingAssetType)}>
+          <option value="ALL">주식+ETF</option>
+          <option value="STOCK">주식만</option>
+          <option value="ETF">ETF만</option>
+        </select></label>
+      </div>
+
+      {error && <div className="error">{error}</div>}
+      {loading && <div className="ranking-loading panel">순위를 불러오는 중입니다...</div>}
+      {!loading && items.length === 0 && <EmptyPanel title="수급 순위" message={dataQuality?.message ?? "먼저 전체 수급 갱신을 실행하세요."} />}
+      {!loading && items.length > 0 && (
+        <div className="ranking-table-wrap panel">
+          <table className="ranking-table">
+            <thead>
+              <tr>
+                <th>순위</th>
+                <th>전일</th>
+                <th>종목</th>
+                <th>시장</th>
+                <th>종가</th>
+                <th>시가총액</th>
+                <th>외국인 수량</th>
+                <th>기관 수량</th>
+                <th>합산 변동률</th>
+                <th>{metricLabel(metric)} 변동률</th>
+                <th>외국인 실제 보유율</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <InvestorRankingRow key={item.code} item={item} metric={metric} onSelect={onSelectStock} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function InvestorRankingRow({ item, metric, onSelect }: { item: InvestorRankingItem; metric: RankingMetric; onSelect: (code: string) => void }) {
+  const score = metricValue(item, metric);
+  const rankChange = item.rank_change;
+  return (
+    <tr>
+      <td className="rank-number">{item.rank}</td>
+      <td className={rankChange == null ? "rank-new" : rankChange > 0 ? "up" : rankChange < 0 ? "down" : ""}>
+        {rankChange == null ? "신규" : rankChange === 0 ? "-" : `${rankChange > 0 ? "▲" : "▼"}${Math.abs(rankChange)}`}
+      </td>
+      <td className="ranking-name"><button type="button" onClick={() => onSelect(item.code)}>{item.name}<small>{item.code}</small></button></td>
+      <td>{item.market}{item.security_type === "ETF" && <em className="asset-badge">ETF</em>}</td>
+      <td>{fmt(item.close)}</td>
+      <td>{money(item.market_cap)}</td>
+      <td className={numberClass(item.foreign_net_qty)}>{fmt(item.foreign_net_qty)}</td>
+      <td className={numberClass(item.institution_net_qty)}>{fmt(item.institution_net_qty)}</td>
+      <td className={numberClass(item.combined_change_ratio)}>{ratio(item.combined_change_ratio)}</td>
+      <td className={numberClass(score)}>{ratio(score)}</td>
+      <td>{ratio(item.foreign_holding_ratio)}</td>
+    </tr>
+  );
+}
+
+function metricLabel(metric: RankingMetric) {
+  if (metric === "institution") return "기관";
+  if (metric === "combined") return "합산";
+  return "외국인";
+}
+
+function metricValue(item: InvestorRankingItem, metric: RankingMetric) {
+  if (metric === "institution") return item.institution_change_ratio;
+  if (metric === "combined") return item.combined_change_ratio;
+  return item.foreign_change_ratio;
+}
+
+function ratio(value: number | null | undefined) {
+  if (value == null) return "-";
+  return `${value > 0 ? "+" : ""}${value.toFixed(4)}%`;
+}
+
+function numberClass(value: number | null | undefined) {
+  if (value == null || value === 0) return "";
+  return value > 0 ? "up" : "down";
 }
 
 function SettingsDialog({

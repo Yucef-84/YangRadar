@@ -23,7 +23,7 @@ button, input { font: inherit; }
 
 .topbar {
   display: grid;
-  grid-template-columns: 140px minmax(260px, 420px) 86px 86px 180px 1fr;
+  grid-template-columns: 140px minmax(260px, 420px) 86px 106px 86px minmax(160px, 1fr);
   gap: 6px;
   align-items: center;
   padding: 5px 6px;
@@ -55,6 +55,12 @@ button:disabled { opacity: 0.55; cursor: wait; }
   align-items: center;
   justify-content: center;
   gap: 4px;
+}
+
+.action.active-action {
+  color: white;
+  background: #214d82;
+  border-color: #173b66;
 }
 
 .icon-button {
@@ -116,6 +122,154 @@ button:disabled { opacity: 0.55; cursor: wait; }
   color: #8b1111;
   background: #fff0f0;
   border: 1px solid #d79090;
+}
+
+.ranking-view {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ranking-heading {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+}
+
+.ranking-heading h1 {
+  font-size: 18px;
+}
+
+.ranking-job {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #526170;
+  font-size: 12px;
+}
+
+.ranking-job.running {
+  color: #315f99;
+  font-weight: 700;
+}
+
+.ranking-job button {
+  height: 28px;
+  padding: 0 10px;
+  color: white;
+  background: #315f99;
+  border-color: #214d82;
+  font-weight: 700;
+}
+
+.ranking-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+  padding: 7px 9px;
+}
+
+.ranking-filters label {
+  display: grid;
+  gap: 3px;
+  min-width: 135px;
+}
+
+.ranking-filters span {
+  color: #526170;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ranking-filters select {
+  height: 28px;
+  min-width: 135px;
+  padding: 0 7px;
+  border: 1px solid #9aa9b9;
+  background: white;
+}
+
+.ranking-loading {
+  padding: 24px;
+  text-align: center;
+  color: #526170;
+}
+
+.ranking-table-wrap {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.ranking-table {
+  min-width: 1120px;
+}
+
+.ranking-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.ranking-table td,
+.ranking-table th {
+  height: 29px;
+  padding: 4px 6px;
+}
+
+.ranking-table .rank-number {
+  color: #315f99;
+  font-weight: 800;
+}
+
+.ranking-name {
+  text-align: left;
+}
+
+.ranking-name button {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #1c4f86;
+  text-align: left;
+  font-weight: 700;
+}
+
+.ranking-name button:hover {
+  color: #0b7a45;
+  text-decoration: underline;
+}
+
+.ranking-name small {
+  display: block;
+  color: #7a8794;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.asset-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 4px;
+  color: #315f99;
+  background: #e4eef9;
+  border: 1px solid #aac4df;
+  border-radius: 3px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.rank-new {
+  color: #7d5a00;
+  font-weight: 700;
 }
 
 .dashboard.busy { opacity: 0.72; }

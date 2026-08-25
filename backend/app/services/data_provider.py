@@ -60,8 +60,9 @@ class KiwoomRestProvider:
 
     def list_stocks(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not self.configured:
-            return LOCAL_STOCKS, self._quality("stock_list", "api_not_configured", "키움 REST API 키가 설정되지 않아 로컬 종목 목록만 사용합니다.")
-        market_requests = [("0", "KOSPI"), ("10", "KOSDAQ")]
+            return [dict(stock, security_type="STOCK") for stock in LOCAL_STOCKS], self._quality("stock_list", "api_not_configured", "키움 REST API 키가 설정되지 않아 로컬 종목 목록만 사용합니다.")
+        # ka10099 uses 0=KOSPI, 10=KOSDAQ, and 8=ETF.
+        market_requests = [("0", "KOSPI"), ("10", "KOSDAQ"), ("8", "ETF")]
         stocks: list[dict[str, Any]] = []
         messages: list[str] = []
         try:
@@ -72,16 +73,93 @@ class KiwoomRestProvider:
                 except KiwoomApiError as exc:
                     messages.append(f"{fallback_market}: {exc.message}")
 
-            deduped = {stock["code"]: stock for stock in stocks}
+            deduped: dict[str, dict[str, Any]] = {}
+            for stock in stocks:
+                existing = deduped.get(stock["code"])
+                if existing and existing.get("security_type") == "ETF" and stock.get("security_type") != "ETF":
+                    continue
+                deduped[stock["code"]] = stock
             stocks = sorted(deduped.values(), key=lambda item: (item["market"], item["name"], item["code"]))
             if stocks:
                 quality = self._quality("stock_list", "ok" if not messages else "partial", "키움 REST 종목 목록을 수신했습니다.")
                 if messages:
                     quality["message"] += " 일부 시장은 실패했습니다: " + " / ".join(messages)
                 return stocks, quality
-            return LOCAL_STOCKS, self._quality("stock_list", "unavailable", "키움 종목 목록 응답을 해석하지 못해 로컬 목록을 사용합니다.")
+            return [dict(stock, security_type="STOCK") for stock in LOCAL_STOCKS], self._quality("stock_list", "unavailable", "키움 종목 목록 응답을 해석하지 못해 로컬 목록을 사용합니다.")
         except KiwoomApiError as exc:
-            return LOCAL_STOCKS, self._quality("stock_list", exc.code, exc.message)
+            return [dict(stock, security_type="STOCK") for stock in LOCAL_STOCKS], self._quality("stock_list", exc.code, exc.message)
+
+    def collect_investor_daily(
+        self,
+        stocks: list[dict[str, Any]],
+        target_date: str,
+        progress: Any | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if not self.configured:
+            return [], self._quality("investor_daily", "api_not_configured", "키움 REST API 키가 설정되지 않아 전체 수급을 수집할 수 없습니다.")
+
+        rows: list[dict[str, Any]] = []
+        failures: list[str] = []
+        total = len(stocks)
+        for index, stock in enumerate(stocks, start=1):
+            code = str(stock.get("code") or "").zfill(6)
+            try:
+                quote = self._get_quote(code)
+                close = quote.get("close")
+                listed_shares = int(quote.get("listed_shares") or stock.get("listed_shares") or 0)
+                if not close or not listed_shares:
+                    raise KiwoomApiError("missing_data", "종가 또는 상장주식수가 없습니다.")
+                investor = self._get_investor_day(code, target_date)
+                if not investor:
+                    raise KiwoomApiError("missing_data", "해당 거래일 투자자 데이터가 없습니다.")
+                holding: dict[str, Any] = {}
+                try:
+                    holding = self._get_foreign_holding(code, target_date) or {}
+                except KiwoomApiError:
+                    # Holding-rate data is supplementary; daily flow can still be ranked.
+                    holding = {}
+                foreign_qty = float(investor.get("foreign_qty") or 0)
+                institution_qty = float(investor.get("institution_qty") or 0)
+                market_cap = float(close) * listed_shares
+                rows.append(
+                    {
+                        "trade_date": investor["date"],
+                        "code": code,
+                        "close": close,
+                        "listed_shares": listed_shares,
+                        "market_cap": market_cap,
+                        "foreign_net_qty": foreign_qty,
+                        "foreign_net_value": investor.get("foreign_value") or 0,
+                        "institution_net_qty": institution_qty,
+                        "institution_net_value": investor.get("institution_value") or 0,
+                        "foreign_change_ratio": _ratio(foreign_qty, listed_shares),
+                        "institution_change_ratio": _ratio(institution_qty, listed_shares),
+                        "combined_change_ratio": _ratio(foreign_qty + institution_qty, listed_shares),
+                        "foreign_holding_qty": (
+                            holding.get("holding_qty")
+                            if holding.get("holding_qty") is not None
+                            else investor.get("foreign_holding_qty")
+                        ),
+                        "foreign_holding_ratio": (
+                            holding.get("holding_ratio")
+                            if holding.get("holding_ratio") is not None
+                            else investor.get("foreign_holding_ratio")
+                        ),
+                        "data_status": "ok",
+                    }
+                )
+            except KiwoomApiError as exc:
+                failures.append(f"{code}: {exc.message}")
+            except (TypeError, ValueError) as exc:
+                failures.append(f"{code}: 데이터 변환 실패({exc})")
+            if progress:
+                progress(index, total, len(rows), len(failures))
+
+        status = "ok" if rows and not failures else "partial" if rows else "unavailable"
+        message = f"일별 수급 {len(rows)}개 종목을 저장할 수 있습니다."
+        if failures:
+            message += f" 실패 {len(failures)}개."
+        return rows, self._quality("investor_daily", status, message)
 
     def dashboard(self, code: str, lookback: int, timeframe: str = "daily") -> dict[str, Any]:
         stock = local_stock(code)
@@ -242,6 +320,57 @@ class KiwoomRestProvider:
         parsed.sort(key=lambda item: item["date"])
         return parsed
 
+    def _get_investor_day(self, code: str, target_date: str) -> dict[str, Any] | None:
+        data = self._post(
+            "/api/dostk/chart",
+            "ka10060",
+            {"dt": target_date.replace("-", ""), "stk_cd": code, "amt_qty_tp": "2", "trde_tp": "0", "unit_tp": "1"},
+        )
+        qty_rows = self._parse_investor_rows(data)
+        if not qty_rows:
+            return None
+        target = next((row for row in qty_rows if row["date"] == target_date), None)
+        if target is None:
+            eligible = [row for row in qty_rows if row["date"] <= target_date]
+            target = eligible[-1] if eligible else qty_rows[-1]
+        try:
+            value_data = self._post(
+                "/api/dostk/chart",
+                "ka10060",
+                {"dt": target_date.replace("-", ""), "stk_cd": code, "amt_qty_tp": "1", "trde_tp": "0", "unit_tp": "1"},
+            )
+            value_rows = self._parse_investor_rows(value_data)
+            value = next((row for row in value_rows if row["date"] == target["date"]), None)
+            if value:
+                target = {
+                    **target,
+                    "foreign_value": value.get("foreign_qty") or value.get("foreign_value") or 0,
+                    "institution_value": value.get("institution_qty") or value.get("institution_value") or 0,
+                }
+        except KiwoomApiError:
+            pass
+        return target
+
+    def _get_foreign_holding(self, code: str, target_date: str) -> dict[str, Any] | None:
+        data = self._post("/api/dostk/frgnistt", "ka10008", {"stk_cd": code})
+        rows = _find_first_list(data, ["stk_frgnr", "output", "list"])
+        parsed: list[dict[str, Any]] = []
+        for row in rows:
+            date = _format_date(_first(row, ["dt", "date"]))
+            if not date:
+                continue
+            parsed.append(
+                {
+                    "date": date,
+                    "holding_qty": _to_abs_number(_first(row, ["poss_stkcnt", "foreign_holding_qty"])),
+                    "holding_ratio": _to_number(_first(row, ["wght", "foreign_holding_ratio"])),
+                }
+            )
+        if not parsed:
+            return None
+        parsed.sort(key=lambda item: item["date"])
+        return next((row for row in parsed if row["date"] == target_date), parsed[-1])
+
     def _parse_investor_rows(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         rows = _find_first_list(data, ["stk_invsr_orgn_chart", "output", "list"])
         parsed: list[dict[str, Any]] = []
@@ -271,6 +400,12 @@ class KiwoomRestProvider:
                         _first(row, ["orgn_netprps_amt", "inst_netprps_amt", "orgn_trde_amt", "inst_amt", "institution_value"])
                     )
                     or 0,
+                    "foreign_holding_qty": _to_abs_number(
+                        _first(row, ["poss_stkcnt", "foreign_holding_qty", "frgnr_poss_stkcnt"])
+                    ),
+                    "foreign_holding_ratio": _to_number(
+                        _first(row, ["wght", "foreign_holding_ratio", "frgnr_wght"])
+                    ),
                 }
             )
         parsed.sort(key=lambda item: item["date"])
@@ -445,7 +580,7 @@ class KiwoomRestProvider:
         return data
 
     def _parse_stock_list(self, data: dict[str, Any], fallback_market: str = "KRX") -> list[dict[str, Any]]:
-        rows = _find_first_list(data, ["list", "stk_info", "output", "items"])
+        rows = _find_first_list(data, ["list", "stk_info", "result_list", "output", "items"])
         stocks: list[dict[str, Any]] = []
         for row in rows:
             code = _stock_code(_first(row, ["stk_cd", "code", "isu_cd"]))
@@ -456,9 +591,10 @@ class KiwoomRestProvider:
                 {
                     "code": code.zfill(6),
                     "name": str(name),
-                    "market": str(_first(row, ["marketName", "mrkt_nm", "market", "marketCode"]) or fallback_market),
+                    "market": _market_name(row, fallback_market),
                     "sector": _first(row, ["upName", "upSizeName", "upjong_nm", "sector"]),
                     "listed_shares": _to_abs_number(_first(row, ["listCount", "list_stock_cnt", "listed_shares"])),
+                    "security_type": "ETF" if fallback_market == "ETF" else _security_type(row, name),
                 }
             )
         return stocks
@@ -504,6 +640,14 @@ class DataProvider:
 
     def build_dashboard(self, code: str, lookback: int, timeframe: str = "daily") -> dict[str, Any]:
         return self.kiwoom.dashboard(code, lookback, timeframe)
+
+    def collect_investor_daily(
+        self,
+        stocks: list[dict[str, Any]],
+        target_date: str,
+        progress: Any | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return self.kiwoom.collect_investor_daily(stocks, target_date, progress)
 
     def status(self) -> dict[str, Any]:
         return self.kiwoom.status()
@@ -577,6 +721,59 @@ def _format_date(value: Any) -> str | None:
     if not digits or len(digits) < 8:
         return None
     return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+
+
+def _ratio(value: float, denominator: int) -> float:
+    if not denominator:
+        return 0.0
+    return round(value / denominator * 100, 6)
+
+
+def _market_name(row: dict[str, Any], fallback: str) -> str:
+    market_code = str(_first(row, ["marketCode", "market_code", "mrkt_cd"]) or "").strip()
+    by_code = {
+        "0": "KOSPI",
+        "001": "KOSPI",
+        "10": "KOSDAQ",
+        "101": "KOSDAQ",
+    }
+    if market_code in by_code:
+        return by_code[market_code]
+    raw = str(_first(row, ["marketName", "mrkt_nm", "market"]) or "").strip()
+    normalized = raw.upper()
+    if "KOSPI" in normalized or "코스피" in raw:
+        return "KOSPI"
+    if "KOSDAQ" in normalized or "코스닥" in raw:
+        return "KOSDAQ"
+    return raw or fallback
+
+
+def _security_type(row: dict[str, Any], name: Any) -> str:
+    etf_flag = str(_first(row, ["etf_yn", "etfYn", "is_etf"]) or "").strip().upper()
+    if etf_flag in {"Y", "YES", "TRUE", "1", "ETF"}:
+        return "ETF"
+    etn_flag = str(_first(row, ["etn_yn", "etnYn", "is_etn"]) or "").strip().upper()
+    if etn_flag in {"Y", "YES", "TRUE", "1", "ETN"}:
+        return "ETN"
+    values = [
+        str(_first(row, ["security_type", "stk_kind", "secu_tp", "etf_yn", "etfYn", "asset_type"]) or ""),
+        str(_first(row, ["marketName", "mrkt_nm", "market"]) or ""),
+        str(name or ""),
+    ]
+    joined = " ".join(values).upper()
+    if "ETN" in joined:
+        return "ETN"
+    if "ELW" in joined:
+        return "ELW"
+    if "ETF" in joined:
+        return "ETF"
+    if any(token in joined for token in ["우선", "PREFERRED"]):
+        return "PREFERRED"
+    if "스팩" in joined or "SPAC" in joined:
+        return "SPAC"
+    if "리츠" in joined or "REIT" in joined:
+        return "REIT"
+    return "STOCK"
 
 
 def _parse_expiry(value: Any) -> datetime | None:
