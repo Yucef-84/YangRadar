@@ -229,6 +229,16 @@ def get_investor_dates(limit: int = 30) -> list[str]:
     return [str(row["trade_date"]) for row in rows]
 
 
+def get_investor_codes(trade_date: str) -> set[str]:
+    """Return successfully stored symbols so an interrupted collection can resume."""
+    with connect() as conn:
+        rows = conn.execute(
+            "select code from investor_daily where trade_date = ? and data_status = 'ok'",
+            (trade_date,),
+        ).fetchall()
+    return {str(row["code"]) for row in rows}
+
+
 def get_latest_investor_date() -> str | None:
     dates = get_investor_dates(1)
     return dates[0] if dates else None

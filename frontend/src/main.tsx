@@ -185,6 +185,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const [market, setMarket] = useState<RankingMarket>("ALL");
   const [assetType, setAssetType] = useState<RankingAssetType>("ALL");
   const [date, setDate] = useState("");
+  const [tableGap, setTableGap] = useState(6);
   const [response, setResponse] = useState<Awaited<ReturnType<typeof getInvestorRanking>> | null>(null);
   const [jobStatus, setJobStatus] = useState<InvestorRankingStatus | null>(null);
   const [loading, setLoading] = useState(false);
@@ -249,15 +250,15 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const items = response?.items ?? [];
   const dataQuality = response?.data_quality;
   const statusMessage = job?.status === "running"
-    ? `${job.message ?? "수집 중"} (${job.completed.toLocaleString("ko-KR")}/${job.total.toLocaleString("ko-KR")})`
+    ? `${job.message ?? "수집 중"} · ${job.completed.toLocaleString("ko-KR")}/${job.total.toLocaleString("ko-KR")} · 성공 ${job.saved.toLocaleString("ko-KR")} · 실패 ${job.failed.toLocaleString("ko-KR")}`
     : job?.message ?? dataQuality?.message ?? "전체 종목 일별 수급 데이터가 없습니다.";
 
   return (
     <section className="ranking-view">
       <div className="ranking-heading panel">
         <div>
-          <h1>외국인·기관 수급 순위</h1>
-          <p>시총 대비 일일 보유변동률 · 전체 종목 및 ETF</p>
+          <h1>매일 변동 TOP 100 · 외국인·기관 수급 순위</h1>
+          <p>시가총액 환산(상장주식수 기준) 일일 보유변동률 · 전체 종목 및 ETF</p>
         </div>
         <div className={`ranking-job ${job?.status === "running" ? "running" : ""}`}>
           <span>{statusMessage}</span>
@@ -291,6 +292,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
           <option value="STOCK">주식만</option>
           <option value="ETF">ETF만</option>
         </select></label>
+        <label className="ranking-gap-control"><span>표 간격 · {tableGap}px</span><input type="range" min="3" max="14" step="1" value={tableGap} onChange={(event) => setTableGap(Number(event.target.value))} /></label>
       </div>
 
       {error && <div className="error">{error}</div>}
@@ -298,7 +300,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
       {!loading && items.length === 0 && <EmptyPanel title="수급 순위" message={dataQuality?.message ?? "먼저 전체 수급 갱신을 실행하세요."} />}
       {!loading && items.length > 0 && (
         <div className="ranking-table-wrap panel">
-          <table className="ranking-table">
+          <table className="ranking-table" style={{ "--ranking-cell-gap": `${tableGap}px` } as React.CSSProperties}>
             <thead>
               <tr>
                 <th>순위</th>
@@ -337,10 +339,10 @@ function InvestorRankingRow({ item, metric, onSelect }: { item: InvestorRankingI
       </td>
       <td className="ranking-name"><button type="button" onClick={() => onSelect(item.code)}>{item.name}<small>{item.code}</small></button></td>
       <td>{item.market}{item.security_type === "ETF" && <em className="asset-badge">ETF</em>}</td>
-      <td>{fmt(item.close)}</td>
-      <td>{money(item.market_cap)}</td>
-      <td className={numberClass(item.foreign_net_qty)}>{fmt(item.foreign_net_qty)}</td>
-      <td className={numberClass(item.institution_net_qty)}>{fmt(item.institution_net_qty)}</td>
+      <td>{price(item.close)}</td>
+      <td>{moneyWon(item.market_cap)}</td>
+      <td className={numberClass(item.foreign_net_qty)}>{shares(item.foreign_net_qty)}</td>
+      <td className={numberClass(item.institution_net_qty)}>{shares(item.institution_net_qty)}</td>
       <td className={numberClass(item.combined_change_ratio)}>{ratio(item.combined_change_ratio)}</td>
       <td className={numberClass(score)}>{ratio(score)}</td>
       <td>{ratio(item.foreign_holding_ratio)}</td>
@@ -363,6 +365,11 @@ function metricValue(item: InvestorRankingItem, metric: RankingMetric) {
 function ratio(value: number | null | undefined) {
   if (value == null) return "-";
   return `${value > 0 ? "+" : ""}${value.toFixed(4)}%`;
+}
+
+function percent(value: number | null | undefined) {
+  if (value == null) return "-";
+  return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
 function numberClass(value: number | null | undefined) {
@@ -577,10 +584,10 @@ function Summary({ dashboard }: { dashboard: Dashboard }) {
         <h1>{stock.name}</h1>
         <p>{stock.code} · {stock.market} · {stock.sector ?? "업종 없음"}</p>
       </div>
-      <Metric label="현재가" value={fmt(summary.close)} accent={(summary.change ?? 0) >= 0 ? "up" : "down"} />
+      <Metric label="현재가 · 원" value={price(summary.close)} accent={(summary.change ?? 0) >= 0 ? "up" : "down"} />
       <Metric label="등락률" value={summary.change_rate == null ? "-" : `${summary.change_rate > 0 ? "+" : ""}${summary.change_rate}%`} accent={(summary.change ?? 0) >= 0 ? "up" : "down"} />
-      <Metric label="거래량" value={fmt(summary.volume)} />
-      <Metric label="거래대금" value={money(summary.trading_value)} />
+      <Metric label="거래량 · 주" value={shares(summary.volume)} />
+      <Metric label="거래대금 · 백만원" value={moneyMillion(summary.trading_value)} />
       <Metric label="회전률" value={summary.turnover_rate == null ? "-" : `${summary.turnover_rate}%`} />
       <div className="description">
         <strong>{statusText(data_quality)}</strong>
@@ -622,7 +629,7 @@ function PriceChart({
   return (
     <section className="panel chart-panel" style={{ height }}>
       <div className="panel-title chart-title">
-        <span>{timeframeLabel(timeframe)} 차트 · MA 5/10/20/60/120 · 과거 {dashboard.ohlcv.length}개</span>
+        <span>{timeframeLabel(timeframe)} 차트 · 가격(원) · 거래량(주) · 거래대금(백만원) · 과거 {dashboard.ohlcv.length}개</span>
         <div className="timeframe-tabs">
           {chartTimeframes.map((item) => (
             <button
@@ -639,8 +646,27 @@ function PriceChart({
           <i className="ma5" />5 <i className="ma10" />10 <i className="ma20" />20 <i className="ma60" />60 <i className="ma120" />120
         </span>
       </div>
+      <ChartStats rows={dashboard.ohlcv} />
       <TradingChart dashboard={dashboard} />
     </section>
+  );
+}
+
+function ChartStats({ rows }: { rows: Ohlcv[] }) {
+  const latest = rows[rows.length - 1];
+  const first = rows[0];
+  const high = Math.max(...rows.map((row) => row.high));
+  const low = Math.min(...rows.map((row) => row.low));
+  const averageVolume = rows.reduce((sum, row) => sum + row.volume, 0) / rows.length;
+  const periodReturn = first?.close ? ((latest.close / first.close) - 1) * 100 : null;
+  return (
+    <div className="chart-stats">
+      <span><small>기간 고가</small><strong>{price(high)}</strong></span>
+      <span><small>기간 저가</small><strong>{price(low)}</strong></span>
+      <span><small>기간 수익률</small><strong className={numberClass(periodReturn)}>{percent(periodReturn)}</strong></span>
+      <span><small>평균 거래량</small><strong>{shares(averageVolume)}</strong></span>
+      <span><small>최근 거래대금</small><strong>{moneyMillion(latest?.trading_value)}</strong></span>
+    </div>
   );
 }
 
@@ -682,7 +708,7 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
         horzLine: { color: "#5f7287", labelBackgroundColor: "#315f99" },
       },
       localization: {
-        priceFormatter: (price: number) => price.toLocaleString("ko-KR"),
+        priceFormatter: (value: number) => price(value),
       },
       handleScroll: {
         mouseWheel: true,
@@ -756,8 +782,8 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
       const date = typeof param.time === "string" ? param.time : String(param.time);
       tooltip.innerHTML = `
         <strong>${date}</strong>
-        <span>시 ${fmt(candle.open)} · 고 ${fmt(candle.high)} · 저 ${fmt(candle.low)} · 종 ${fmt(candle.close)}</span>
-        <span>거래량 ${fmt(volume?.value)} · 거래대금 ${money(rowByDate(rows, date)?.trading_value)}</span>
+        <span>시 ${price(candle.open)} · 고 ${price(candle.high)} · 저 ${price(candle.low)} · 종 ${price(candle.close)}</span>
+        <span>거래량 ${shares(volume?.value)} · 거래대금 ${moneyMillion(rowByDate(rows, date)?.trading_value)}</span>
       `;
       const left = Math.min(Math.max(param.point.x + 14, 8), container.clientWidth - 270);
       const top = Math.min(Math.max(param.point.y + 14, 8), container.clientHeight - 78);
@@ -822,9 +848,9 @@ function DailyTradingPanel({ dashboard }: { dashboard: Dashboard }) {
         <thead>
           <tr>
             <th>일자</th>
-            <th>종가</th>
-            <th>거래량</th>
-            <th>거래대금</th>
+            <th>종가(원)</th>
+            <th>거래량(주)</th>
+            <th>거래대금(백만원)</th>
             <th>회전률</th>
           </tr>
         </thead>
@@ -832,9 +858,9 @@ function DailyTradingPanel({ dashboard }: { dashboard: Dashboard }) {
           {dashboard.ohlcv.slice().reverse().map((row) => (
             <tr key={row.date}>
               <td>{row.date}</td>
-              <td>{fmt(row.close)}</td>
-              <td>{fmt(row.volume)}</td>
-              <td>{money(row.trading_value)}</td>
+              <td>{price(row.close)}</td>
+              <td>{shares(row.volume)}</td>
+              <td>{moneyMillion(row.trading_value)}</td>
               <td>{listedShares ? `${((row.volume / listedShares) * 100).toFixed(4)}%` : "-"}</td>
             </tr>
           ))}
@@ -851,8 +877,25 @@ function ThemePanel({ dashboard }: { dashboard: Dashboard }) {
       <p className="theme-description">{dashboard.summary.description}</p>
       <div className="theme-list">
         {dashboard.themes && dashboard.themes.length > 0
-          ? dashboard.themes.slice(0, 8).map((theme) => <span key={theme.code}>{theme.name}</span>)
-          : <span>테마 정보 없음</span>}
+          ? dashboard.themes.slice(0, 8).map((theme) => (
+            <article className="theme-card" key={theme.code}>
+              <div className="theme-card-heading">
+                <strong>{theme.name}</strong>
+                {theme.stock_count != null && <small>{fmt(theme.stock_count)}종목</small>}
+              </div>
+              <div className="theme-card-stats">
+                <span className={numberClass(theme.change_rate)}>{percent(theme.change_rate)}</span>
+                <span>기간 {percent(theme.period_return)}</span>
+              </div>
+              {(theme.rising_count != null || theme.falling_count != null) && (
+                <small className="theme-card-breadth">
+                  상승 {theme.rising_count ?? 0} · 하락 {theme.falling_count ?? 0}
+                </small>
+              )}
+              {theme.main_stock && <small className="theme-card-breadth">대표 {theme.main_stock}</small>}
+            </article>
+          ))
+          : <span className="theme-empty">테마 정보 없음 · API 응답을 확인하세요.</span>}
       </div>
     </section>
   );
@@ -870,11 +913,11 @@ function InvestorPanel({ dashboard }: { dashboard: Dashboard }) {
         <thead>
           <tr>
             <th>기간</th>
-            <th>외국인 수량</th>
-            <th>외국인 금액</th>
+            <th>외국인 수량(주)</th>
+            <th>외국인 금액(백만원)</th>
             <th>비율</th>
-            <th>기관 수량</th>
-            <th>기관 금액</th>
+            <th>기관 수량(주)</th>
+            <th>기관 금액(백만원)</th>
             <th>비율</th>
           </tr>
         </thead>
@@ -884,11 +927,11 @@ function InvestorPanel({ dashboard }: { dashboard: Dashboard }) {
             return (
               <tr key={period}>
                 <td>{period}일</td>
-                <td className={row.foreign_qty >= 0 ? "up" : "down"}>{fmt(row.foreign_qty)}</td>
-                <td className={row.foreign_value >= 0 ? "up" : "down"}>{money(row.foreign_value)}</td>
+                <td className={row.foreign_qty >= 0 ? "up" : "down"}>{shares(row.foreign_qty)}</td>
+                <td className={row.foreign_value >= 0 ? "up" : "down"}>{moneyMillion(row.foreign_value)}</td>
                 <td>{row.foreign_ratio}%</td>
-                <td className={row.institution_qty >= 0 ? "up" : "down"}>{fmt(row.institution_qty)}</td>
-                <td className={row.institution_value >= 0 ? "up" : "down"}>{money(row.institution_value)}</td>
+                <td className={row.institution_qty >= 0 ? "up" : "down"}>{shares(row.institution_qty)}</td>
+                <td className={row.institution_value >= 0 ? "up" : "down"}>{moneyMillion(row.institution_value)}</td>
                 <td>{row.institution_ratio}%</td>
               </tr>
             );
@@ -911,31 +954,31 @@ function ProgramPanel({ dashboard }: { dashboard: Dashboard }) {
       <div className="panel-title">프로그램매매 비차익 추이</div>
       <div className="program-summary">
         {periods.map((period) => (
-          <span key={period}>{period}일 {fmt(dashboard.program_summary[period]?.net_amount_m)}백만</span>
+          <span key={period}>{period}일 {moneyMillion(dashboard.program_summary[period]?.net_amount_m)}</span>
         ))}
       </div>
       <table>
         <thead>
           <tr>
             <th>일자</th>
-            <th>현재가</th>
+            <th>현재가(원)</th>
             <th>등락률</th>
-            <th>거래량</th>
-            <th>매도</th>
-            <th>매수</th>
-            <th>순매수</th>
+            <th>거래량(주)</th>
+            <th>매도(백만원)</th>
+            <th>매수(백만원)</th>
+            <th>순매수(백만원)</th>
           </tr>
         </thead>
         <tbody>
           {dashboard.program_trading.slice(-18).reverse().map((row) => (
             <tr key={row.date}>
               <td>{row.date.slice(5)}</td>
-              <td>{fmt(row.close)}</td>
+              <td>{price(row.close)}</td>
               <td className={(row.change_rate ?? 0) >= 0 ? "up" : "down"}>{row.change_rate == null ? "-" : `${row.change_rate}%`}</td>
-              <td>{fmt(row.volume)}</td>
-              <td>{fmt(row.sell_amount_m)}</td>
-              <td>{fmt(row.buy_amount_m)}</td>
-              <td className={row.net_amount_m >= 0 ? "up" : "down"}>{fmt(row.net_amount_m)}</td>
+              <td>{shares(row.volume)}</td>
+              <td>{moneyMillion(row.sell_amount_m)}</td>
+              <td>{moneyMillion(row.buy_amount_m)}</td>
+              <td className={row.net_amount_m >= 0 ? "up" : "down"}>{moneyMillion(row.net_amount_m)}</td>
             </tr>
           ))}
         </tbody>
@@ -1012,10 +1055,33 @@ function fmt(value: number | null | undefined) {
   return Math.round(value).toLocaleString("ko-KR");
 }
 
-function money(value: number | null | undefined) {
+function price(value: number | null | undefined) {
+  return value == null ? "-" : `₩${fmt(value)}`;
+}
+
+function shares(value: number | null | undefined) {
+  return value == null ? "-" : `${fmt(value)}주`;
+}
+
+function moneyWon(value: number | null | undefined) {
+  return value == null ? "-" : compactWon(value);
+}
+
+function moneyMillion(value: number | null | undefined) {
   if (value == null) return "-";
-  if (Math.abs(value) >= 100_000_000) return `${(value / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억`;
-  return fmt(value);
+  if (Math.abs(value) < 1_000) {
+    return `${value < 0 ? "-" : ""}₩${Math.round(Math.abs(value)).toLocaleString("ko-KR")}백만원`;
+  }
+  return compactWon(value * 1_000_000);
+}
+
+function compactWon(value: number) {
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
+  if (absolute >= 1_000_000_000_000) return `${sign}₩${(absolute / 1_000_000_000_000).toFixed(2)}조`;
+  if (absolute >= 100_000_000) return `${sign}₩${(absolute / 100_000_000).toFixed(1)}억`;
+  if (absolute >= 10_000) return `${sign}₩${(absolute / 10_000).toFixed(1)}만`;
+  return `${sign}₩${Math.round(absolute).toLocaleString("ko-KR")}`;
 }
 
 function timeframeLabel(timeframe: ChartTimeframe) {

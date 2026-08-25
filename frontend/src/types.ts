@@ -47,6 +47,12 @@ export interface MarketAdrRow {
 export interface Theme {
   code: string;
   name: string;
+  stock_count?: number | null;
+  change_rate?: number | null;
+  period_return?: number | null;
+  rising_count?: number | null;
+  falling_count?: number | null;
+  main_stock?: string | null;
 }
 
 export interface InvestorRow {

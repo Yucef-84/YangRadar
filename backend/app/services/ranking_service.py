@@ -4,7 +4,7 @@ from datetime import datetime
 from threading import Lock, Thread
 from typing import Any
 
-from ..database import save_investor_daily, save_ranking_job
+from ..database import get_investor_codes, save_investor_daily, save_ranking_job
 from .data_provider import DataProvider
 
 
@@ -48,41 +48,77 @@ class InvestorRankingService:
 
             upsert_stocks(stocks, datetime.now().isoformat(timespec="seconds"))
             total = len(stocks)
+            existing_codes = get_investor_codes(target_date)
+            pending_stocks = [stock for stock in stocks if str(stock.get("code") or "").zfill(6) not in existing_codes]
+            already_saved = total - len(pending_stocks)
             save_ranking_job(
                 status="running",
                 total=total,
-                message=f"전체 {total:,}개 종목의 일별 수급을 수집하는 중입니다.",
+                completed=already_saved,
+                saved=already_saved,
+                failed=0,
+                message=(
+                    f"전체 {total:,}개 중 기존 성공 {already_saved:,}개를 건너뛰고 "
+                    f"{len(pending_stocks):,}개를 수집하는 중입니다."
+                ),
                 updated_at=datetime.now().isoformat(timespec="seconds"),
             )
 
-            last_saved_progress = {"completed": 0, "saved": 0, "failed": 0}
+            saved_total = {"count": already_saved}
+            last_saved_progress = {"completed": already_saved, "saved": already_saved, "failed": 0}
+
+            def save_batch(batch: list[dict[str, Any]]) -> None:
+                saved_total["count"] += save_investor_daily(batch, datetime.now().isoformat(timespec="seconds"))
+                save_ranking_job(
+                    status="running",
+                    total=total,
+                    completed=last_saved_progress["completed"],
+                    saved=saved_total["count"],
+                    failed=last_saved_progress["failed"],
+                    message=f"수급 수집 중 · 부분 저장 {saved_total['count']:,}개",
+                    updated_at=datetime.now().isoformat(timespec="seconds"),
+                )
 
             def progress(completed: int, total_count: int, saved: int, failed: int) -> None:
-                if completed == total_count or completed - last_saved_progress["completed"] >= 25:
-                    last_saved_progress.update(completed=completed, saved=saved, failed=failed)
+                full_completed = already_saved + completed
+                if full_completed == total or full_completed - last_saved_progress["completed"] >= 25:
+                    last_saved_progress.update(completed=full_completed, saved=saved_total["count"], failed=failed)
                     save_ranking_job(
                         status="running",
-                        total=total_count,
-                        completed=completed,
-                        saved=saved,
+                        total=total,
+                        completed=full_completed,
+                        saved=saved_total["count"],
                         failed=failed,
-                        message=f"수급 수집 중 {completed:,}/{total_count:,}",
+                        message=f"수급 수집 중 {full_completed:,}/{total:,} · 부분 저장 {saved_total['count']:,}개",
                         updated_at=datetime.now().isoformat(timespec="seconds"),
                     )
 
-            rows, quality = self.provider.collect_investor_daily(stocks, target_date, progress)
-            saved = save_investor_daily(rows, datetime.now().isoformat(timespec="seconds"))
+            rows: list[dict[str, Any]] = []
+            quality = {"status": "ok", "message": "기존 저장 데이터가 최신입니다."}
+            if pending_stocks:
+                rows, quality = self.provider.collect_investor_daily(
+                    pending_stocks,
+                    target_date,
+                    progress,
+                    save_batch,
+                    include_values=False,
+                    include_holdings=True,
+                )
+            saved = saved_total["count"]
             actual_dates = sorted({str(row["trade_date"]) for row in rows})
             message = quality.get("message") or f"{saved:,}개 종목 수급 수집 완료"
+            if already_saved:
+                message += f" 기존 성공 {already_saved:,}개 재사용"
             if actual_dates:
                 message += f" 기준일: {actual_dates[-1]}"
-            status = "completed" if quality.get("status") in {"ok", "partial"} else "failed"
+            failed = max(total - saved, 0)
+            status = "completed" if saved > 0 else "failed"
             save_ranking_job(
                 status=status,
                 total=total,
                 completed=total,
                 saved=saved,
-                failed=max(total - saved, 0),
+                failed=failed,
                 message=message,
                 finished_at=datetime.now().isoformat(timespec="seconds"),
                 updated_at=datetime.now().isoformat(timespec="seconds"),
