@@ -17,6 +17,46 @@
 - 일별/주간/월간 거래대금과 거래량 회전률
 - 차트 영역과 오른쪽 패널 크기 조절
 
+## 친구에게 ZIP으로 보내는 방법
+
+이 프로젝트는 GitHub 공개 배포보다 ZIP 파일로 전달해서 친구 PC에서 로컬 실행하는 방식이 안전합니다. 내 PC의 `.env`, 가상환경, 로그 파일은 ZIP에 넣지 않습니다.
+
+보내는 사람은 PowerShell에서 아래 명령을 실행해 배포용 ZIP을 만듭니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\make-zip.ps1
+```
+
+완료되면 `release\YangRadar.zip` 파일이 생깁니다. 이 ZIP 파일만 이메일이나 메신저로 보내면 됩니다.
+
+## 가장 쉬운 실행 방법
+
+ZIP 파일을 원하는 폴더에 압축 해제하고 `Start YangRadar.cmd`를 더블클릭하세요.
+
+먼저 PC에 Python 3.11 이상과 Node.js 20 이상이 설치되어 있어야 합니다.
+
+첫 실행에서는 필요한 Python·Node 패키지를 자동으로 설치하므로 시간이 조금 걸릴 수 있습니다. 설치가 끝나면 백엔드와 프론트엔드를 숨김 상태로 실행하고 브라우저에서 YangRadar를 자동으로 엽니다. 다음 실행부터는 바로 시작됩니다.
+
+종료하려면 `Stop YangRadar.cmd`를 더블클릭하세요.
+
+브라우저가 자동으로 열리지 않으면 아래 주소를 직접 여세요.
+
+```text
+http://127.0.0.1:4173
+```
+
+앱 상단의 `설정` 버튼에서 본인의 키움 REST API 앱키와 시크릿키를 입력합니다. 입력값은 실행 중인 PC의 `.env` 파일에만 저장됩니다.
+
+### PowerShell에서 직접 실행하기
+
+더블클릭 대신 PowerShell을 사용하려면 프로젝트 폴더에서 다음 명령을 실행하세요.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-yangradar.ps1
+```
+
+설치 중 `python`, `node`, `npm`을 찾을 수 없다는 메시지가 나오면 Python과 Node.js를 먼저 설치한 뒤 PowerShell을 새로 열어 다시 실행합니다.
+
 ## 실행 준비
 
 키움 REST API 키는 앱 상단의 `설정` 버튼에서 입력할 수 있습니다. 입력한 키는 이 PC의 프로젝트 폴더 `.env` 파일에만 저장되며 GitHub에는 올라가지 않습니다.
@@ -65,7 +105,7 @@ npm.cmd run dev --prefix frontend
 브라우저에서 아래 주소를 엽니다.
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:4173
 ```
 
 화면이 예전 상태로 보이면 `Ctrl+F5`로 강제 새로고침하세요.

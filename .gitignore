@@ -1,7 +1,13 @@
 .env
+.venv/
+.runtime/
 *.pyc
 __pycache__/
 data/*.sqlite3
+*.log
+*.pid
+yangradar-review.png
 frontend/node_modules/
 frontend/dist/
+release/
 
