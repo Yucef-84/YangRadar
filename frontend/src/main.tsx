@@ -1072,7 +1072,7 @@ function PriceChart({
   return (
     <section className="panel chart-panel" style={{ height }}>
       <div className="panel-title chart-title">
-        <span>{timeframeLabel(timeframe)} 차트 · 가격(원) · 거래량(주) · 거래대금(원화) · 과거 {dashboard.ohlcv.length}개</span>
+        <span className="chart-title-copy">{timeframeLabel(timeframe)} 가격·거래량 차트 · 과거 {dashboard.ohlcv.length}개</span>
         <div className="timeframe-tabs">
           {chartTimeframes.map((item) => (
             <button
@@ -1086,7 +1086,11 @@ function PriceChart({
           ))}
         </div>
         <span className="chart-legend">
-          <i className="ma5" />5 <i className="ma10" />10 <i className="ma20" />20 <i className="ma60" />60 <i className="ma120" />120
+          <span><i className="ma5" />이평 5</span>
+          <span><i className="ma10" />이평 10</span>
+          <span><i className="ma20" />이평 20</span>
+          <span><i className="ma60" />이평 60</span>
+          <span><i className="ma120" />이평 120</span>
         </span>
       </div>
       <ChartStats rows={dashboard.ohlcv} />
@@ -1139,6 +1143,11 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
         minimumWidth: 96,
         scaleMargins: { top: 0.08, bottom: 0.28 },
       },
+      leftPriceScale: {
+        borderColor: "#a9b7c6",
+        minimumWidth: 96,
+        scaleMargins: { top: 0.78, bottom: 0 },
+      },
       timeScale: {
         borderColor: "#a9b7c6",
         timeVisible: false,
@@ -1176,12 +1185,11 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
       wickDownColor: "#26384b",
     });
     const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceFormat: { type: "volume" },
-      priceScaleId: "",
+      priceFormat: { type: "custom", formatter: compactShares, minMove: 1 },
+      priceScaleId: "left",
       color: "#7f97b0",
-    });
-    volumeSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.78, bottom: 0 },
+      priceLineVisible: false,
+      lastValueVisible: false,
     });
 
     const rows = dashboard.ohlcv;
@@ -1514,6 +1522,16 @@ function price(value: number | null | undefined) {
 
 function shares(value: number | null | undefined) {
   return value == null ? "-" : `${fmt(value)}주`;
+}
+
+function compactShares(value: number | null | undefined) {
+  if (value == null) return "-";
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
+  const compact = (divisor: number) => Number((absolute / divisor).toFixed(1)).toLocaleString("ko-KR", { maximumFractionDigits: 1 });
+  if (absolute >= 100_000_000) return `${sign}${compact(100_000_000)}억주`;
+  if (absolute >= 10_000) return `${sign}${compact(10_000)}만주`;
+  return `${sign}${Math.round(absolute).toLocaleString("ko-KR")}주`;
 }
 
 function moneyWon(value: number | null | undefined) {

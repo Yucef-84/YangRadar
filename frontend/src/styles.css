@@ -634,10 +634,13 @@ p { margin: 2px 0 0; color: #526170; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
-.chart-title > span:first-child {
+.chart-title-copy {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -646,6 +649,7 @@ p { margin: 2px 0 0; color: #526170; }
 
 .timeframe-tabs {
   display: inline-flex;
+  flex: 0 0 auto;
   gap: 3px;
   margin-left: auto;
 }
@@ -667,10 +671,19 @@ p { margin: 2px 0 0; color: #526170; }
 
 .chart-legend {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   color: #465565;
+  font-size: 11px;
   font-weight: 700;
+  white-space: nowrap;
+}
+
+.chart-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .chart-legend i {
