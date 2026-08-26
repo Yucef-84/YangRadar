@@ -64,6 +64,13 @@ type RankingSortKey =
   | "foreign_holding_ratio";
 type SortDirection = "asc" | "desc";
 type RankingColumnKey = RankingSortKey;
+type RankingQuery = {
+  date: string;
+  metric: RankingMetric;
+  direction: RankingDirection;
+  market: RankingMarket;
+  assetType: RankingAssetType;
+};
 
 const rankingColumns: Array<{ key: RankingColumnKey; label: string; defaultWidth: number; minWidth: number; maxWidth: number }> = [
   { key: "rank", label: "순위", defaultWidth: 58, minWidth: 48, maxWidth: 90 },
@@ -82,6 +89,14 @@ const rankingColumns: Array<{ key: RankingColumnKey; label: string; defaultWidth
 const defaultRankingColumnWidths = Object.fromEntries(
   rankingColumns.map((column) => [column.key, column.defaultWidth]),
 ) as Record<RankingColumnKey, number>;
+
+const defaultRankingQuery: RankingQuery = {
+  date: "",
+  metric: "foreign",
+  direction: "inflow",
+  market: "ALL",
+  assetType: "ALL",
+};
 
 const rankingColumnStorageKey = "yangradar-ranking-column-widths";
 const rankingRowStorageKey = "yangradar-ranking-row-heights";
@@ -373,6 +388,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const [assetType, setAssetType] = useState<RankingAssetType>("ALL");
   const [date, setDate] = useState("");
   const [collectionDate, setCollectionDate] = useState("");
+  const [appliedQuery, setAppliedQuery] = useState<RankingQuery>(defaultRankingQuery);
   const [sortState, setSortState] = useState<{ key: RankingSortKey; direction: SortDirection }>({ key: "rank", direction: "asc" });
   const [columnWidths, setColumnWidths] = useState<Record<RankingColumnKey, number>>(readRankingColumnWidths);
   const [rowHeights, setRowHeights] = useState<Record<string, number>>(readRankingRowHeights);
@@ -382,6 +398,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const [refreshing, setRefreshing] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState("");
+  const rankingRequestId = useRef(0);
 
   async function loadStatus() {
     try {
@@ -391,16 +408,26 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
     }
   }
 
-  async function loadRanking() {
+  async function loadRanking(query: RankingQuery) {
+    const requestId = ++rankingRequestId.current;
     setLoading(true);
     setError("");
     try {
-      const next = await getInvestorRanking({ date: date || undefined, metric, direction, market, assetType });
+      const next = await getInvestorRanking({
+        date: query.date || undefined,
+        metric: query.metric,
+        direction: query.direction,
+        market: query.market,
+        assetType: query.assetType,
+      });
+      if (requestId !== rankingRequestId.current) return;
       setResponse(next);
+      setAppliedQuery(query);
     } catch (err) {
+      if (requestId !== rankingRequestId.current) return;
       setError(err instanceof Error ? err.message : "수급 순위를 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
+      if (requestId === rankingRequestId.current) setLoading(false);
     }
   }
 
@@ -409,8 +436,8 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   }, []);
 
   useEffect(() => {
-    void loadRanking();
-  }, [date, metric, direction, market, assetType]);
+    void loadRanking(defaultRankingQuery);
+  }, []);
 
   useEffect(() => {
     const previousJobStatus = jobStatus?.job.status;
@@ -418,11 +445,11 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
     const timer = window.setInterval(() => {
       void getInvestorRankingStatus().then((next) => {
         setJobStatus(next);
-        if (previousJobStatus === "running" && next.job.status !== "running") void loadRanking();
+        if (previousJobStatus === "running" && next.job.status !== "running") void loadRanking(appliedQuery);
       }).catch(() => undefined);
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [jobStatus?.job.status, date, metric, direction, market, assetType]);
+  }, [jobStatus?.job.status, appliedQuery.date, appliedQuery.metric, appliedQuery.direction, appliedQuery.market, appliedQuery.assetType]);
 
   useEffect(() => {
     try {
@@ -439,6 +466,11 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
       // Local storage can be disabled in a private browser context.
     }
   }, [rowHeights]);
+
+  function handleRankingSearch() {
+    const query: RankingQuery = { date, metric, direction, market, assetType };
+    void loadRanking(query);
+  }
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -545,6 +577,12 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
           <option value="STOCK">주식만</option>
           <option value="ETF">ETF만</option>
         </select></label>
+        <div className="ranking-filter-actions">
+          <span>조건을 선택한 후 ‘순위 조회’를 누르면 표에 적용됩니다.</span>
+          <button type="button" onClick={handleRankingSearch} disabled={loading}>
+            {loading ? "조회 중" : "순위 조회"}
+          </button>
+        </div>
       </div>
 
       <div className="ranking-collection panel">
@@ -586,7 +624,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
                   <SortableHeader
                     key={column.key}
                     column={column}
-                    label={column.key === "score" ? `${metricLabel(metric)} 변동률` : column.label}
+                    label={column.key === "score" ? `${metricLabel(appliedQuery.metric)} 변동률` : column.label}
                     sortState={sortState}
                     onSort={(key) => setSortState((current) => current.key === key
                       ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
@@ -601,7 +639,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
                 <InvestorRankingRow
                   key={item.code}
                   item={item}
-                  metric={metric}
+                  metric={appliedQuery.metric}
                   rowHeight={rowHeights[item.code] ?? 30}
                   onSelect={onSelectStock}
                   onResizeStart={(event) => startRowResize(item.code, event, rowHeights, setRowHeights)}

@@ -258,6 +258,35 @@ button:disabled { opacity: 0.55; cursor: wait; }
   background: white;
 }
 
+.ranking-filter-actions {
+  min-width: 230px;
+  flex: 1 1 300px;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.ranking-filter-actions > span {
+  flex: 1 1 auto;
+  color: #657484;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ranking-filter-actions > button {
+  height: 28px;
+  min-width: 90px;
+  padding: 0 10px;
+  color: white;
+  background: #315f99;
+  border-color: #214d82;
+  font-weight: 700;
+}
+
+.ranking-filter-actions > button:hover {
+  background: #214d82;
+}
+
 .ranking-collection {
   display: flex;
   flex-wrap: wrap;
@@ -1175,6 +1204,18 @@ td:first-child, th:first-child { text-align: center; }
   .ranking-collection-copy {
     min-width: 0;
     flex-basis: 100%;
+  }
+
+  .ranking-filter-actions {
+    width: 100%;
+    min-width: 0;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ranking-filter-actions > button {
+    width: 100%;
+    min-width: 0;
   }
 
   .ranking-job {
