@@ -59,6 +59,42 @@ class PriceChartTradingValueUnitTests(TestCase):
         self.assertEqual(rows[0]["trading_value"], 0)
 
 
+class ThemeStatusTests(TestCase):
+    def _dashboard_for_themes(self, theme_result: list[dict] | Exception) -> dict:
+        provider = _provider({})
+        theme_patch = patch.object(provider, "_get_themes_for_stock")
+        with theme_patch as get_themes, patch.object(provider, "_get_quote", return_value={}), patch.object(
+            provider, "_get_price_chart", return_value=[]
+        ), patch.object(provider, "_get_investor_chart", return_value=[]), patch.object(
+            provider, "_get_program_trading", return_value=[]
+        ), patch.object(provider, "_get_market_adr", return_value=[]):
+            if isinstance(theme_result, Exception):
+                get_themes.side_effect = theme_result
+            else:
+                get_themes.return_value = theme_result
+            return provider.dashboard("005930", 10)
+
+    def test_successful_empty_theme_response_is_ok(self) -> None:
+        result = self._dashboard_for_themes([])
+
+        self.assertEqual(result["data_quality"]["theme_status"], "ok")
+        self.assertEqual(result["themes"], [])
+
+    def test_successful_theme_response_is_ok_and_preserved(self) -> None:
+        themes = [{"code": "T1", "name": "반도체"}]
+
+        result = self._dashboard_for_themes(themes)
+
+        self.assertEqual(result["data_quality"]["theme_status"], "ok")
+        self.assertEqual(result["themes"], themes)
+
+    def test_theme_api_error_preserves_error_code_and_message(self) -> None:
+        result = self._dashboard_for_themes(KiwoomApiError("rate_limited", "temporary theme limit"))
+
+        self.assertEqual(result["data_quality"]["theme_status"], "rate_limited")
+        self.assertIn("temporary theme limit", result["data_quality"]["messages"])
+
+
 class InvestorDateSelectionTests(TestCase):
     def test_exact_date_is_selected(self) -> None:
         provider = _provider(

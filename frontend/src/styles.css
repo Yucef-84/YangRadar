@@ -853,6 +853,13 @@ td:first-child, th:first-child { text-align: center; }
   line-height: 1.4;
 }
 
+.theme-context {
+  padding: 5px 8px 0;
+  color: #657484;
+  font-size: 10px;
+  line-height: 1.3;
+}
+
 .theme-list {
   display: flex;
   flex-wrap: wrap;
@@ -899,18 +906,38 @@ td:first-child, th:first-child { text-align: center; }
   color: #6d7b8a;
   font-size: 10px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.theme-card-meta {
+  margin-top: 4px;
+  color: #6d7b8a;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .theme-card-stats {
   margin-top: 5px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: baseline;
   color: #536272;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
 .theme-card-stats > span:first-child {
-  font-size: 14px;
-  font-weight: 800;
+  font-weight: 700;
+}
+
+.theme-card-stats > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .theme-card-breadth {

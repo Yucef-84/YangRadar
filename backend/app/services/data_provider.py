@@ -359,9 +359,10 @@ class KiwoomRestProvider:
 
         try:
             themes = self._get_themes_for_stock(code)
-            data_quality["theme_status"] = "ok" if themes else "unavailable"
+            data_quality["theme_status"] = "ok"
         except KiwoomApiError as exc:
-            data_quality["theme_status"] = "unavailable"
+            data_quality["theme_status"] = exc.code
+            data_quality["messages"].append(exc.message)
 
         try:
             market_adr = self._get_market_adr()

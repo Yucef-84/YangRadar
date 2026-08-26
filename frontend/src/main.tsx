@@ -806,8 +806,12 @@ function ratio(value: number | null | undefined) {
 }
 
 function percent(value: number | null | undefined) {
-  if (value == null) return "-";
+  if (value == null || !Number.isFinite(value)) return "-";
   return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function themeCount(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value) ? "-" : fmt(value);
 }
 
 function numberClass(value: number | null | undefined) {
@@ -1311,31 +1315,40 @@ function DailyTradingPanel({ dashboard }: { dashboard: Dashboard }) {
 }
 
 function ThemePanel({ dashboard }: { dashboard: Dashboard }) {
+  const themes = (dashboard.themes ?? []).filter((theme) => Boolean(theme.name?.trim())).slice(0, 8);
+  const themeStatus = dashboard.data_quality.theme_status;
+  const emptyMessage = themeStatus === "ok"
+    ? "이 종목에 대해 확인된 관련 테마가 없습니다."
+    : panelMessage(dashboard.data_quality, "theme_status");
+
   return (
     <section className="panel theme-panel">
-      <div className="panel-title">종목 설명 · 테마</div>
+      <div className="panel-title">종목 개요 · 관련 테마</div>
       <p className="theme-description">{dashboard.summary.description}</p>
+      {themes.length > 0 && <div className="theme-context">키움 API 관련 테마 · 최대 8개 표시</div>}
       <div className="theme-list">
-        {dashboard.themes && dashboard.themes.length > 0
-          ? dashboard.themes.slice(0, 8).map((theme) => (
+        {themes.length > 0
+          ? themes.map((theme) => (
             <article className="theme-card" key={theme.code}>
               <div className="theme-card-heading">
                 <strong>{theme.name}</strong>
-                {theme.stock_count != null && <small>{fmt(theme.stock_count)}종목</small>}
               </div>
+              {theme.stock_count != null && Number.isFinite(theme.stock_count) && (
+                <div className="theme-card-meta">구성 {fmt(theme.stock_count)}종목</div>
+              )}
               <div className="theme-card-stats">
-                <span className={numberClass(theme.change_rate)}>{percent(theme.change_rate)}</span>
-                <span>기간 {percent(theme.period_return)}</span>
+                <span className={numberClass(theme.change_rate)}>등락률 {percent(theme.change_rate)}</span>
+                <span>기간 수익률 {percent(theme.period_return)}</span>
               </div>
               {(theme.rising_count != null || theme.falling_count != null) && (
                 <small className="theme-card-breadth">
-                  상승 {theme.rising_count ?? 0} · 하락 {theme.falling_count ?? 0}
+                  상승 {themeCount(theme.rising_count)} · 하락 {themeCount(theme.falling_count)}
                 </small>
               )}
-              {theme.main_stock && <small className="theme-card-breadth">대표 {theme.main_stock}</small>}
+              {theme.main_stock?.trim() && <small className="theme-card-breadth">대표 종목 {theme.main_stock.trim()}</small>}
             </article>
           ))
-          : <span className="theme-empty">테마 정보 없음 · API 응답을 확인하세요.</span>}
+          : <span className="theme-empty">{emptyMessage}</span>}
       </div>
     </section>
   );
