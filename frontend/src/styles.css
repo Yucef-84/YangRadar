@@ -184,6 +184,28 @@ button:disabled { opacity: 0.55; cursor: wait; }
   font-size: 12px;
 }
 
+.ranking-job-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+}
+
+.ranking-retry-hint {
+  color: #657484;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ranking-job-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .ranking-job.running {
   color: #315f99;
   font-weight: 700;
@@ -196,6 +218,16 @@ button:disabled { opacity: 0.55; cursor: wait; }
   background: #315f99;
   border-color: #214d82;
   font-weight: 700;
+}
+
+.ranking-job .ranking-retry-button {
+  color: #7a3e0b;
+  background: #fff4df;
+  border-color: #c98b43;
+}
+
+.ranking-job .ranking-retry-button:hover {
+  background: #ffedd0;
 }
 
 .ranking-filters {
@@ -1059,11 +1091,15 @@ td:first-child, th:first-child { text-align: center; }
     justify-content: space-between;
   }
 
-  .ranking-job span {
+  .ranking-job-copy > span {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .ranking-job-actions {
+    min-width: 0;
   }
 }
 
@@ -1088,7 +1124,13 @@ td:first-child, th:first-child { text-align: center; }
     flex-direction: column;
   }
 
-  .ranking-job button {
+  .ranking-job-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .ranking-job-actions button {
+    flex: 1 1 180px;
     width: 100%;
   }
 }

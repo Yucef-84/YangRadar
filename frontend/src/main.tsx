@@ -151,6 +151,23 @@ function formatAutoSchedulerMessage(autoScheduler: AutoSchedulerStatus | null | 
   }
 }
 
+function rankingJobMessage(job: InvestorRankingStatus["job"] | undefined, fallback: string): string {
+  if (!job) return fallback;
+  const total = job.total.toLocaleString("ko-KR");
+  const saved = job.saved.toLocaleString("ko-KR");
+  const failed = job.failed.toLocaleString("ko-KR");
+  if (job.status === "running") {
+    return `${job.message ?? "수집 중"} · ${job.completed.toLocaleString("ko-KR")}/${total} · 성공 ${saved} · 실패 ${failed}`;
+  }
+  if (job.status === "failed") return `수집 실패 · 성공 ${saved} / ${total} · 실패 ${failed}`;
+  if (job.status === "completed") {
+    return job.failed > 0
+      ? `수집 완료 · 성공 ${saved} / ${total} · 실패 ${failed}`
+      : `수집 완료 · ${saved} / ${total}`;
+  }
+  return job.message ?? fallback;
+}
+
 function readRankingColumnWidths() {
   if (typeof window === "undefined") return defaultRankingColumnWidths;
   try {
@@ -363,6 +380,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const [jobStatus, setJobStatus] = useState<InvestorRankingStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState("");
 
   async function loadStatus() {
@@ -436,6 +454,27 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
     }
   }
 
+  async function handleRetryFailed(targetDate: string) {
+    setRetrying(true);
+    setError("");
+    try {
+      await refreshInvestorRanking(targetDate);
+      setJobStatus((current) => current ? {
+        ...current,
+        job: {
+          ...current.job,
+          status: "running",
+          target_date: targetDate,
+          message: "실패 종목 재수집을 시작했습니다.",
+        },
+      } : current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "실패 종목 재시도를 시작하지 못했습니다.");
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   const job = jobStatus?.job;
   const items = response?.items ?? [];
   const dataQuality = response?.data_quality;
@@ -445,9 +484,9 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const sortedItems = useMemo(() => sortRankingItems(items, sortState), [items, sortState]);
   const rankingTableWidth = rankingColumns.reduce((sum, column) => sum + columnWidths[column.key], 0);
   const autoScheduler = jobStatus?.auto_scheduler;
-  const statusMessage = job?.status === "running"
-    ? `${job.message ?? "수집 중"} · ${job.completed.toLocaleString("ko-KR")}/${job.total.toLocaleString("ko-KR")} · 성공 ${job.saved.toLocaleString("ko-KR")} · 실패 ${job.failed.toLocaleString("ko-KR")}`
-    : job?.message ?? dataQuality?.message ?? "전체 종목 일별 수급 데이터가 없습니다.";
+  const statusMessage = rankingJobMessage(job, dataQuality?.message ?? "전체 종목 일별 수급 데이터가 없습니다.");
+  const retryTargetDate = job?.target_date;
+  const showRetry = Boolean(retryTargetDate && job?.status !== "running" && (job.failed > 0 || job.status === "failed"));
 
   return (
     <section className="ranking-view">
@@ -460,10 +499,29 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
           </p>
         </div>
         <div className={`ranking-job ${job?.status === "running" ? "running" : ""}`}>
-          <span>{statusMessage}</span>
-          <button type="button" onClick={() => void handleRefresh()} disabled={refreshing || job?.status === "running"}>
-            {refreshing || job?.status === "running" ? "수집 중" : "전체 수급 갱신"}
-          </button>
+          <div className="ranking-job-copy">
+            <span>{statusMessage}</span>
+            {showRetry && retryTargetDate && (
+              <small className="ranking-retry-hint">
+                {retryTargetDate} 기준 · 저장된 성공 종목은 건너뛰고 누락 종목만 다시 수집합니다.
+              </small>
+            )}
+          </div>
+          <div className="ranking-job-actions">
+            <button type="button" onClick={() => void handleRefresh()} disabled={refreshing || job?.status === "running"}>
+              {refreshing || job?.status === "running" ? "수집 중" : "전체 수급 갱신"}
+            </button>
+            {showRetry && retryTargetDate && (
+              <button
+                type="button"
+                className="ranking-retry-button"
+                onClick={() => void handleRetryFailed(retryTargetDate)}
+                disabled={retrying || refreshing || job?.status === "running"}
+              >
+                {retrying ? "재시도 중" : job.failed > 0 ? `실패 ${job.failed.toLocaleString("ko-KR")}개 재시도` : "실패 수집 재시도"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
