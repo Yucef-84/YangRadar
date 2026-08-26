@@ -111,8 +111,36 @@ def _ratio(qty: float, listed_shares: int) -> float:
 
 
 def _description(stock: dict[str, Any], themes: list[dict[str, Any]]) -> str:
-    sector = stock.get("sector") or "업종 정보 없음"
-    market = stock.get("market") or "시장 정보 없음"
-    theme_text = ", ".join(str(theme.get("name")) for theme in themes[:3] if theme.get("name"))
-    suffix = f" 테마: {theme_text}." if theme_text else ""
-    return f"{market} 상장 종목입니다. 업종: {sector}.{suffix}"
+    market = _description_value(
+        stock.get("market"),
+        "상장시장 정보 없음",
+        {"", "UNKNOWN", "N/A", "NA", "-", "시장정보없음", "상장시장정보없음"},
+    )
+    sector = _description_value(
+        stock.get("sector"),
+        "업종 정보 없음",
+        {"", "UNKNOWN", "N/A", "NA", "-", "정보없음", "업종정보없음", "업종없음"},
+    )
+    theme_names: list[str] = []
+    seen_names: set[str] = set()
+    for theme in themes:
+        raw_name = theme.get("name")
+        name = str(raw_name).strip() if raw_name is not None else ""
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        theme_names.append(name)
+        if len(theme_names) >= 3:
+            break
+
+    market_text = market if market == "상장시장 정보 없음" else f"{market} 상장 종목"
+    sector_text = sector if sector == "업종 정보 없음" else f"업종 {sector}"
+    parts = [market_text, sector_text]
+    parts.append(f"키움 관련 테마: {', '.join(theme_names)}" if theme_names else "관련 테마 정보 없음")
+    return " · ".join(parts) + "."
+
+
+def _description_value(value: Any, fallback: str, missing_values: set[str]) -> str:
+    text = str(value).strip() if value is not None else ""
+    normalized = "".join(text.split()).upper()
+    return fallback if normalized in missing_values else text

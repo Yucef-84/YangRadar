@@ -4,6 +4,7 @@ export interface Stock {
   market: string;
   sector?: string | null;
   listed_shares?: number | null;
+  security_type?: string | null;
 }
 
 export interface Ohlcv {
@@ -46,6 +47,12 @@ export interface MarketAdrRow {
 export interface Theme {
   code: string;
   name: string;
+  stock_count?: number | null;
+  change_rate?: number | null;
+  period_return?: number | null;
+  rising_count?: number | null;
+  falling_count?: number | null;
+  main_stock?: string | null;
 }
 
 export interface InvestorRow {
@@ -143,6 +150,85 @@ export interface Dashboard {
   themes: Theme[];
   timeframe?: ChartTimeframe;
   data_quality: DataQuality;
+}
+
+export type RankingMetric = "foreign" | "institution" | "combined";
+export type RankingDirection = "inflow" | "outflow";
+export type RankingMarket = "ALL" | "KOSPI" | "KOSDAQ";
+export type RankingAssetType = "ALL" | "STOCK" | "ETF";
+
+export interface InvestorRankingItem {
+  trade_date: string;
+  code: string;
+  name: string;
+  market: string;
+  security_type: string;
+  close: number | null;
+  market_cap: number | null;
+  listed_shares: number | null;
+  foreign_net_qty: number | null;
+  foreign_net_value: number | null;
+  institution_net_qty: number | null;
+  institution_net_value: number | null;
+  foreign_change_ratio: number | null;
+  institution_change_ratio: number | null;
+  combined_change_ratio: number | null;
+  foreign_holding_qty: number | null;
+  foreign_holding_ratio: number | null;
+  score: number;
+  rank: number;
+  previous_rank: number | null;
+  rank_change: number | null;
+}
+
+export interface InvestorRankingResponse {
+  date: string | null;
+  metric?: RankingMetric;
+  direction?: RankingDirection;
+  market?: RankingMarket;
+  asset_type?: RankingAssetType;
+  items: InvestorRankingItem[];
+  dates: string[];
+  data_quality: DataQuality;
+}
+
+export interface RankingJob {
+  status: "idle" | "running" | "completed" | "failed";
+  target_date: string | null;
+  total: number;
+  completed: number;
+  saved: number;
+  failed: number;
+  message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+}
+
+export type AutoSchedulerState =
+  | "idle"
+  | "waiting_time"
+  | "waiting_data"
+  | "running"
+  | "completed"
+  | "error"
+  | "disabled"
+  | "weekend";
+
+export interface AutoSchedulerStatus {
+  state: AutoSchedulerState;
+  target_date: string | null;
+  last_checked_at: string | null;
+  next_check_at: string | null;
+  ready_count: number | null;
+  sample_count: number | null;
+  message: string | null;
+}
+
+export interface InvestorRankingStatus {
+  job: RankingJob;
+  dates: string[];
+  auto_scheduler: AutoSchedulerStatus;
 }
 
 export interface SearchResponse {

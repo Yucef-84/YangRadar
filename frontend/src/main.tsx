@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { RefreshCw, Search, Settings as SettingsIcon, X } from "lucide-react";
+import { BarChart3, LayoutDashboard, RefreshCw, Search, Settings as SettingsIcon, X } from "lucide-react";
 import {
   CandlestickSeries,
   ColorType,
@@ -14,8 +14,33 @@ import {
   type MouseEventParams,
   type Time,
 } from "lightweight-charts";
-import { getDashboard, getKiwoomSettings, refreshStock, saveKiwoomSettings, searchStocks, testKiwoomAuth } from "./api";
-import type { ChartTimeframe, Dashboard, DataQuality, KiwoomSettings, KiwoomSettingsPayload, Ohlcv, Stock } from "./types";
+import {
+  getDashboard,
+  getInvestorRanking,
+  getInvestorRankingStatus,
+  getKiwoomSettings,
+  refreshInvestorRanking,
+  refreshStock,
+  saveKiwoomSettings,
+  searchStocks,
+  testKiwoomAuth,
+} from "./api";
+import type {
+  AutoSchedulerStatus,
+  ChartTimeframe,
+  Dashboard,
+  DataQuality,
+  InvestorRankingItem,
+  InvestorRankingStatus,
+  KiwoomSettings,
+  KiwoomSettingsPayload,
+  Ohlcv,
+  RankingAssetType,
+  RankingDirection,
+  RankingMarket,
+  RankingMetric,
+  Stock,
+} from "./types";
 import "./styles.css";
 
 const periods = ["5", "20", "60", "120"];
@@ -24,6 +49,166 @@ const chartTimeframes: Array<{ value: ChartTimeframe; label: string; lookback: n
   { value: "weekly", label: "주봉", lookback: 300 },
   { value: "monthly", label: "월봉", lookback: 240 },
 ];
+
+type RankingSortKey =
+  | "rank"
+  | "previous_rank"
+  | "name"
+  | "market"
+  | "close"
+  | "market_cap"
+  | "foreign_net_qty"
+  | "institution_net_qty"
+  | "combined_change_ratio"
+  | "score"
+  | "foreign_holding_ratio";
+type SortDirection = "asc" | "desc";
+type RankingColumnKey = RankingSortKey;
+type RankingQuery = {
+  date: string;
+  metric: RankingMetric;
+  direction: RankingDirection;
+  market: RankingMarket;
+  assetType: RankingAssetType;
+};
+
+const rankingColumns: Array<{ key: RankingColumnKey; label: string; defaultWidth: number; minWidth: number; maxWidth: number }> = [
+  { key: "rank", label: "순위", defaultWidth: 58, minWidth: 48, maxWidth: 90 },
+  { key: "previous_rank", label: "전일", defaultWidth: 64, minWidth: 52, maxWidth: 110 },
+  { key: "name", label: "종목", defaultWidth: 250, minWidth: 150, maxWidth: 430 },
+  { key: "market", label: "시장", defaultWidth: 92, minWidth: 72, maxWidth: 150 },
+  { key: "close", label: "종가(원)", defaultWidth: 112, minWidth: 90, maxWidth: 180 },
+  { key: "market_cap", label: "시가총액(원화)", defaultWidth: 132, minWidth: 100, maxWidth: 220 },
+  { key: "foreign_net_qty", label: "외국인 수량(주)", defaultWidth: 138, minWidth: 105, maxWidth: 230 },
+  { key: "institution_net_qty", label: "기관 수량(주)", defaultWidth: 138, minWidth: 105, maxWidth: 230 },
+  { key: "combined_change_ratio", label: "합산 변동률", defaultWidth: 116, minWidth: 92, maxWidth: 190 },
+  { key: "score", label: "변동률", defaultWidth: 124, minWidth: 96, maxWidth: 200 },
+  { key: "foreign_holding_ratio", label: "외국인 실제 보유율", defaultWidth: 150, minWidth: 120, maxWidth: 220 },
+];
+
+const defaultRankingColumnWidths = Object.fromEntries(
+  rankingColumns.map((column) => [column.key, column.defaultWidth]),
+) as Record<RankingColumnKey, number>;
+
+const defaultRankingQuery: RankingQuery = {
+  date: "",
+  metric: "foreign",
+  direction: "inflow",
+  market: "ALL",
+  assetType: "ALL",
+};
+
+const rankingColumnStorageKey = "yangradar-ranking-column-widths";
+const rankingRowStorageKey = "yangradar-ranking-row-heights";
+
+type AppView = "dashboard" | "rankings";
+
+function readViewFromLocation(): AppView {
+  if (typeof window === "undefined") return "dashboard";
+  return new URLSearchParams(window.location.search).get("view") === "rankings" ? "rankings" : "dashboard";
+}
+
+function kstDateKey(value: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function formatKstTimestamp(value: string | null | undefined, targetDate: string | null | undefined, forceDate = false): string {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const time = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(parsed);
+  const includeDate = forceDate || !targetDate || kstDateKey(parsed) !== targetDate;
+  if (!includeDate) return `${time} KST`;
+  const date = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    month: "numeric",
+    day: "numeric",
+  }).format(parsed);
+  return `${date} ${time} KST`;
+}
+
+function formatAutoSchedulerMessage(autoScheduler: AutoSchedulerStatus | null | undefined): string {
+  if (!autoScheduler) return "자동 수집 상태 확인 중";
+  const nextCheck = formatKstTimestamp(autoScheduler.next_check_at, autoScheduler.target_date);
+  const sample = typeof autoScheduler.ready_count === "number" && typeof autoScheduler.sample_count === "number"
+    ? ` · 표본 ${autoScheduler.ready_count}/${autoScheduler.sample_count}`
+    : "";
+  switch (autoScheduler.state) {
+    case "waiting_time":
+      return `자동 수집 대기 · ${nextCheck || "15:40 KST"}부터 당일 데이터 확인`;
+    case "waiting_data":
+      return `당일 수급 데이터 반영 대기${sample}${nextCheck ? ` · 다음 확인 ${nextCheck}` : ""}`;
+    case "running":
+      return "자동 수집 진행 중";
+    case "completed":
+      return `오늘 자동 수집 완료${nextCheck ? ` · 다음 확인 ${nextCheck}` : ""}`;
+    case "error":
+      return `자동 확인 오류${nextCheck ? ` · 다음 확인 ${nextCheck}` : ""}`;
+    case "disabled":
+      return "자동 수집 비활성 · 키움 API 설정 필요";
+    case "weekend":
+      return `주말 자동 수집 없음${nextCheck ? ` · 다음 확인 ${formatKstTimestamp(autoScheduler.next_check_at, autoScheduler.target_date, true)}` : ""}`;
+    case "idle":
+    default:
+      return "자동 수집 상태 확인 중";
+  }
+}
+
+function rankingJobMessage(job: InvestorRankingStatus["job"] | undefined, fallback: string): string {
+  if (!job) return fallback;
+  const total = job.total.toLocaleString("ko-KR");
+  const saved = job.saved.toLocaleString("ko-KR");
+  const failed = job.failed.toLocaleString("ko-KR");
+  if (job.status === "running") {
+    return `${job.message ?? "수집 중"} · ${job.completed.toLocaleString("ko-KR")}/${total} · 성공 ${saved} · 실패 ${failed}`;
+  }
+  if (job.status === "failed") return `수집 실패 · 성공 ${saved} / ${total} · 실패 ${failed}`;
+  if (job.status === "completed") {
+    return job.failed > 0
+      ? `수집 완료 · 성공 ${saved} / ${total} · 실패 ${failed}`
+      : `수집 완료 · ${saved} / ${total}`;
+  }
+  return job.message ?? fallback;
+}
+
+function readRankingColumnWidths() {
+  if (typeof window === "undefined") return defaultRankingColumnWidths;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(rankingColumnStorageKey) ?? "null") as Record<string, unknown> | null;
+    if (!saved) return defaultRankingColumnWidths;
+    return rankingColumns.reduce((result, column) => ({
+      ...result,
+      [column.key]: clamp(Number(saved[column.key]) || column.defaultWidth, column.minWidth, column.maxWidth),
+    }), {} as Record<RankingColumnKey, number>);
+  } catch {
+    return defaultRankingColumnWidths;
+  }
+}
+
+function readRankingRowHeights() {
+  if (typeof window === "undefined") return {};
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(rankingRowStorageKey) ?? "{}") as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(saved).flatMap(([code, value]) => {
+      const height = Number(value);
+      return Number.isFinite(height) ? [[code, clamp(height, 24, 90)]] : [];
+    }));
+  } catch {
+    return {};
+  }
+}
 
 function App() {
   const [query, setQuery] = useState("삼성전자");
@@ -36,6 +221,34 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [view, setView] = useState<AppView>(readViewFromLocation);
+
+  function navigateToView(nextView: AppView, options: { replace?: boolean } = {}) {
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      const currentParam = url.searchParams.get("view");
+      if (options.replace || currentParam !== nextView) {
+        url.searchParams.set("view", nextView);
+        const historyMethod = options.replace ? "replaceState" : "pushState";
+        window.history[historyMethod]({ ...(window.history.state ?? {}), view: nextView }, "", url);
+      }
+    }
+    setView(nextView);
+  }
+
+  useEffect(() => {
+    const initialView = readViewFromLocation();
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("view") !== initialView) {
+      url.searchParams.set("view", initialView);
+      window.history.replaceState({ ...(window.history.state ?? {}), view: initialView }, "", url);
+    }
+    setView(initialView);
+
+    const handlePopState = () => setView(readViewFromLocation());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   useEffect(() => {
     void loadSettings();
@@ -56,6 +269,7 @@ function App() {
       const response = await searchStocks(query);
       setResults(response.items);
       setSearchQuality(response.data_quality);
+      navigateToView("dashboard");
       if (response.items[0]) setSelected(response.items[0].code);
     } catch (err) {
       setError(err instanceof Error ? err.message : "검색 중 오류가 발생했습니다.");
@@ -108,6 +322,24 @@ function App() {
           <RefreshCw size={16} />
           갱신
         </button>
+        <button
+          className={`action ${view === "dashboard" ? "active-action" : ""}`}
+          onClick={() => navigateToView("dashboard")}
+          aria-current={view === "dashboard" ? "page" : undefined}
+          title="종목 대시보드"
+        >
+          <LayoutDashboard size={16} />
+          대시보드
+        </button>
+        <button
+          className={`action ${view === "rankings" ? "active-action" : ""}`}
+          onClick={() => navigateToView("rankings")}
+          aria-current={view === "rankings" ? "page" : undefined}
+          title="외국인·기관 수급 순위"
+        >
+          <BarChart3 size={16} />
+          수급 순위
+        </button>
         <button className="action" onClick={() => setSettingsOpen(true)} title="키움 API 설정">
           <SettingsIcon size={16} />
           설정
@@ -115,7 +347,7 @@ function App() {
         <StatusBadge quality={dashboard?.data_quality ?? searchQuality} configured={settings?.configured} />
       </header>
 
-      {results.length > 0 && (
+      {view === "dashboard" && results.length > 0 && (
         <div className="result-strip">
           {results.map((stock) => (
             <button key={stock.code} onClick={() => setSelected(stock.code)} className={selected === stock.code ? "active" : ""}>
@@ -126,7 +358,15 @@ function App() {
       )}
 
       {error && <div className="error">{error}</div>}
-      {dashboard && <DashboardView dashboard={dashboard} loading={loading} timeframe={timeframe} onTimeframeChange={setTimeframe} />}
+      {view === "dashboard" && dashboard && <DashboardView dashboard={dashboard} loading={loading} timeframe={timeframe} onTimeframeChange={setTimeframe} />}
+      {view === "rankings" && (
+        <InvestorRankingView
+          onSelectStock={(code) => {
+            setSelected(code);
+            navigateToView("dashboard");
+          }}
+        />
+      )}
       {settingsOpen && (
         <SettingsDialog
           current={settings}
@@ -141,6 +381,449 @@ function App() {
   );
 }
 
+function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) => void }) {
+  const [metric, setMetric] = useState<RankingMetric>("foreign");
+  const [direction, setDirection] = useState<RankingDirection>("inflow");
+  const [market, setMarket] = useState<RankingMarket>("ALL");
+  const [assetType, setAssetType] = useState<RankingAssetType>("ALL");
+  const [date, setDate] = useState("");
+  const [collectionDate, setCollectionDate] = useState("");
+  const [appliedQuery, setAppliedQuery] = useState<RankingQuery>(defaultRankingQuery);
+  const [sortState, setSortState] = useState<{ key: RankingSortKey; direction: SortDirection }>({ key: "rank", direction: "asc" });
+  const [columnWidths, setColumnWidths] = useState<Record<RankingColumnKey, number>>(readRankingColumnWidths);
+  const [rowHeights, setRowHeights] = useState<Record<string, number>>(readRankingRowHeights);
+  const [response, setResponse] = useState<Awaited<ReturnType<typeof getInvestorRanking>> | null>(null);
+  const [jobStatus, setJobStatus] = useState<InvestorRankingStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState("");
+  const rankingRequestId = useRef(0);
+
+  async function loadStatus() {
+    try {
+      setJobStatus(await getInvestorRankingStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "수급 수집 상태를 불러오지 못했습니다.");
+    }
+  }
+
+  async function loadRanking(query: RankingQuery) {
+    const requestId = ++rankingRequestId.current;
+    setLoading(true);
+    setError("");
+    try {
+      const next = await getInvestorRanking({
+        date: query.date || undefined,
+        metric: query.metric,
+        direction: query.direction,
+        market: query.market,
+        assetType: query.assetType,
+      });
+      if (requestId !== rankingRequestId.current) return;
+      setResponse(next);
+      setAppliedQuery(query);
+    } catch (err) {
+      if (requestId !== rankingRequestId.current) return;
+      setError(err instanceof Error ? err.message : "수급 순위를 불러오지 못했습니다.");
+    } finally {
+      if (requestId === rankingRequestId.current) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadStatus();
+  }, []);
+
+  useEffect(() => {
+    void loadRanking(defaultRankingQuery);
+  }, []);
+
+  useEffect(() => {
+    const previousJobStatus = jobStatus?.job.status;
+    const intervalMs = previousJobStatus === "running" ? 2000 : 30000;
+    const timer = window.setInterval(() => {
+      void getInvestorRankingStatus().then((next) => {
+        setJobStatus(next);
+        if (previousJobStatus === "running" && next.job.status !== "running") void loadRanking(appliedQuery);
+      }).catch(() => undefined);
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [jobStatus?.job.status, appliedQuery.date, appliedQuery.metric, appliedQuery.direction, appliedQuery.market, appliedQuery.assetType]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(rankingColumnStorageKey, JSON.stringify(columnWidths));
+    } catch {
+      // Local storage can be disabled in a private browser context.
+    }
+  }, [columnWidths]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(rankingRowStorageKey, JSON.stringify(rowHeights));
+    } catch {
+      // Local storage can be disabled in a private browser context.
+    }
+  }, [rowHeights]);
+
+  function handleRankingSearch() {
+    const query: RankingQuery = { date, metric, direction, market, assetType };
+    void loadRanking(query);
+  }
+
+  async function handleRefresh() {
+    setRefreshing(true);
+    setError("");
+    try {
+      await refreshInvestorRanking(collectionDate || undefined);
+      await loadStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "전체 수급 갱신을 시작하지 못했습니다.");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function handleRetryFailed(targetDate: string) {
+    setRetrying(true);
+    setError("");
+    try {
+      await refreshInvestorRanking(targetDate);
+      setJobStatus((current) => current ? {
+        ...current,
+        job: {
+          ...current.job,
+          status: "running",
+          target_date: targetDate,
+          message: "실패 종목 재수집을 시작했습니다.",
+        },
+      } : current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "실패 종목 재시도를 시작하지 못했습니다.");
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  const job = jobStatus?.job;
+  const items = response?.items ?? [];
+  const dataQuality = response?.data_quality;
+  const availableDates = response?.dates ?? jobStatus?.dates ?? [];
+  const selectedDate = response?.date;
+  const previousDate = selectedDate ? availableDates.find((candidate) => candidate < selectedDate) : undefined;
+  const sortedItems = useMemo(() => sortRankingItems(items, sortState), [items, sortState]);
+  const rankingTableWidth = rankingColumns.reduce((sum, column) => sum + columnWidths[column.key], 0);
+  const rankingTableStyle = {
+    width: `${rankingTableWidth}px`,
+    "--ranking-rank-width": `${columnWidths.rank}px`,
+    "--ranking-previous-width": `${columnWidths.previous_rank}px`,
+  } as React.CSSProperties;
+  const autoScheduler = jobStatus?.auto_scheduler;
+  const statusMessage = rankingJobMessage(job, dataQuality?.message ?? "전체 종목 일별 수급 데이터가 없습니다.");
+  const retryTargetDate = job?.target_date;
+  const showRetry = Boolean(retryTargetDate && job?.status !== "running" && (job.failed > 0 || job.status === "failed"));
+
+  return (
+    <section className="ranking-view">
+      <div className="ranking-heading panel">
+        <div className="ranking-heading-copy">
+          <h1>매일 변동 TOP 100 · 외국인·기관 수급 순위</h1>
+          <p>시가총액 환산(상장주식수 기준) 일일 보유변동률 · 전체 종목 및 ETF</p>
+          <p className={`ranking-auto-status state-${autoScheduler?.state ?? "idle"}`} role="status" aria-live="polite">
+            {formatAutoSchedulerMessage(autoScheduler)}
+          </p>
+        </div>
+        <div className={`ranking-job ${job?.status === "running" ? "running" : ""}`}>
+          <div className="ranking-job-copy">
+            <span>{statusMessage}</span>
+            {showRetry && retryTargetDate && (
+              <small className="ranking-retry-hint">
+                {retryTargetDate} 기준 · 저장된 성공 종목은 건너뛰고 누락 종목만 다시 수집합니다.
+              </small>
+            )}
+          </div>
+          {showRetry && retryTargetDate && (
+            <div className="ranking-job-actions">
+              <button
+                type="button"
+                className="ranking-retry-button"
+                onClick={() => void handleRetryFailed(retryTargetDate)}
+                disabled={retrying || refreshing || job?.status === "running"}
+              >
+                {retrying ? "재시도 중" : job.failed > 0 ? `실패 ${job.failed.toLocaleString("ko-KR")}개 재시도` : "실패 수집 재시도"}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="ranking-filters panel">
+        <label><span>조회 기준일</span><select value={date} onChange={(event) => setDate(event.target.value)}>
+          <option value="">최신 거래일</option>
+          {(response?.dates ?? jobStatus?.dates ?? []).map((item) => <option key={item} value={item}>{item}</option>)}
+        </select></label>
+        <label><span>지표</span><select value={metric} onChange={(event) => setMetric(event.target.value as RankingMetric)}>
+          <option value="foreign">외국인</option>
+          <option value="institution">기관</option>
+          <option value="combined">외국인+기관</option>
+        </select></label>
+        <label><span>방향</span><select value={direction} onChange={(event) => setDirection(event.target.value as RankingDirection)}>
+          <option value="inflow">순유입 TOP 100</option>
+          <option value="outflow">순유출 TOP 100</option>
+        </select></label>
+        <label><span>시장</span><select value={market} onChange={(event) => setMarket(event.target.value as RankingMarket)}>
+          <option value="ALL">전체 시장</option>
+          <option value="KOSPI">KOSPI</option>
+          <option value="KOSDAQ">KOSDAQ</option>
+        </select></label>
+        <label><span>종목 유형</span><select value={assetType} onChange={(event) => setAssetType(event.target.value as RankingAssetType)}>
+          <option value="ALL">주식+ETF</option>
+          <option value="STOCK">주식만</option>
+          <option value="ETF">ETF만</option>
+        </select></label>
+        <div className="ranking-filter-actions">
+          <span>조건을 선택한 후 ‘순위 조회’를 누르면 표에 적용됩니다.</span>
+          <button type="button" onClick={handleRankingSearch} disabled={loading}>
+            {loading ? "조회 중" : "순위 조회"}
+          </button>
+        </div>
+      </div>
+
+      <div className="ranking-collection panel">
+        <div className="ranking-collection-copy">
+          <strong>수동 데이터 수집</strong>
+          <span>조회 기준일과 별개로 전체 종목 수급 데이터를 요청합니다. 비우면 오늘을 요청합니다.</span>
+        </div>
+        <label className="ranking-collect-date">
+          <span>수집 요청일</span>
+          <input type="date" value={collectionDate} onChange={(event) => setCollectionDate(event.target.value)} />
+        </label>
+        <button type="button" onClick={() => void handleRefresh()} disabled={refreshing || job?.status === "running"}>
+          {refreshing || job?.status === "running" ? "수집 중" : "전체 수급 갱신"}
+        </button>
+      </div>
+
+      {availableDates.length > 0 && (
+        <div className="ranking-note panel">
+          <span>현재 표시 기준일: <strong>{selectedDate ?? "-"}</strong></span>
+          {previousDate
+            ? <span>전일 비교 기준: <strong>{previousDate}</strong></span>
+            : <span>이전 기준일 데이터가 없어 전일 순위는 `신규`로 표시됩니다. 수동 데이터 수집에서 요청일을 지정해 과거 거래일을 추가할 수 있습니다.</span>}
+          <span>가로 스크롤 중에도 순위와 종목 열은 고정됩니다. 열 경계와 각 행 하단 손잡이를 드래그해 표 크기를 조절할 수 있습니다.</span>
+        </div>
+      )}
+
+      {error && <div className="error">{error}</div>}
+      {loading && <div className="ranking-loading panel">순위를 불러오는 중입니다...</div>}
+      {!loading && items.length === 0 && <EmptyPanel title="수급 순위" message={dataQuality?.message ?? "먼저 전체 수급 갱신을 실행하세요."} />}
+      {!loading && items.length > 0 && (
+        <div className="ranking-table-wrap panel">
+          <table className="ranking-table" style={rankingTableStyle}>
+            <colgroup>
+              {rankingColumns.map((column) => <col key={column.key} style={{ width: `${columnWidths[column.key]}px` }} />)}
+            </colgroup>
+            <thead>
+              <tr>
+                {rankingColumns.map((column) => (
+                  <SortableHeader
+                    key={column.key}
+                    column={column}
+                    label={column.key === "score" ? `${metricLabel(appliedQuery.metric)} 변동률` : column.label}
+                    sortState={sortState}
+                    onSort={(key) => setSortState((current) => current.key === key
+                      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+                      : { key, direction: "asc" })}
+                    onResizeStart={(event) => startColumnResize(column.key, event, columnWidths, setColumnWidths)}
+                  />
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedItems.map((item) => (
+                <InvestorRankingRow
+                  key={item.code}
+                  item={item}
+                  metric={appliedQuery.metric}
+                  rowHeight={rowHeights[item.code] ?? 30}
+                  onSelect={onSelectStock}
+                  onResizeStart={(event) => startRowResize(item.code, event, rowHeights, setRowHeights)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SortableHeader({
+  column,
+  label,
+  sortState,
+  onSort,
+  onResizeStart,
+}: {
+  column: { key: RankingColumnKey; label: string; defaultWidth: number; minWidth: number; maxWidth: number };
+  label: string;
+  sortState: { key: RankingSortKey; direction: SortDirection };
+  onSort: (key: RankingSortKey) => void;
+  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+}) {
+  const active = sortState.key === column.key;
+  return (
+    <th className={`ranking-col-${column.key}`} aria-sort={active ? sortState.direction === "asc" ? "ascending" : "descending" : "none"}>
+      <button
+        type="button"
+        className="sortable-heading"
+        onClick={() => onSort(column.key)}
+        title={`${label} 기준 정렬`}
+      >
+        <span>{label}</span>
+        <small aria-hidden="true">{active ? (sortState.direction === "asc" ? "▲" : "▼") : "↕"}</small>
+      </button>
+      <button
+        type="button"
+        className="column-resize-handle"
+        aria-label={`${label} 열 너비 조절`}
+        onPointerDown={onResizeStart}
+        onClick={(event) => event.stopPropagation()}
+      />
+    </th>
+  );
+}
+
+function InvestorRankingRow({
+  item,
+  metric,
+  rowHeight,
+  onSelect,
+  onResizeStart,
+}: {
+  item: InvestorRankingItem;
+  metric: RankingMetric;
+  rowHeight: number;
+  onSelect: (code: string) => void;
+  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+}) {
+  const score = metricValue(item, metric);
+  const rankChange = item.rank_change;
+  return (
+    <tr style={{ "--ranking-row-height": `${rowHeight}px` } as React.CSSProperties}>
+      <td className="ranking-col-rank rank-number">
+        <span>{item.rank}</span>
+        <button type="button" className="row-resize-handle" aria-label={`${item.name} 행 높이 조절`} onPointerDown={onResizeStart} />
+      </td>
+      <td
+        className={`ranking-col-previous_rank ${rankChange == null ? "rank-new" : rankChange > 0 ? "up" : rankChange < 0 ? "down" : ""}`}
+        title={rankChange == null ? "이전 기준일에 같은 종목의 순위가 없어 비교할 수 없습니다." : undefined}
+      >
+        {rankChange == null ? "신규" : rankChange === 0 ? "-" : `${rankChange > 0 ? "▲" : "▼"}${Math.abs(rankChange)}`}
+      </td>
+      <td className="ranking-col-name ranking-name"><button type="button" onClick={() => onSelect(item.code)}>{item.name}<small>{item.code}</small></button></td>
+      <td className="ranking-col-market">{item.market}{item.security_type === "ETF" && <em className="asset-badge">ETF</em>}</td>
+      <td className="ranking-col-close">{price(item.close)}</td>
+      <td className="ranking-col-market_cap">{moneyWon(item.market_cap)}</td>
+      <td className={`ranking-col-foreign_net_qty ${numberClass(item.foreign_net_qty)}`}>{shares(item.foreign_net_qty)}</td>
+      <td className={`ranking-col-institution_net_qty ${numberClass(item.institution_net_qty)}`}>{shares(item.institution_net_qty)}</td>
+      <td className={`ranking-col-combined_change_ratio ${numberClass(item.combined_change_ratio)}`}>{ratio(item.combined_change_ratio)}</td>
+      <td className={`ranking-col-score ${numberClass(score)}`}>{ratio(score)}</td>
+      <td className="ranking-col-foreign_holding_ratio">{ratio(item.foreign_holding_ratio)}</td>
+    </tr>
+  );
+}
+
+function startColumnResize(
+  key: RankingColumnKey,
+  event: React.PointerEvent<HTMLButtonElement>,
+  widths: Record<RankingColumnKey, number>,
+  setWidths: React.Dispatch<React.SetStateAction<Record<RankingColumnKey, number>>>,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  const column = rankingColumns.find((item) => item.key === key);
+  if (!column) return;
+  const startX = event.clientX;
+  const startWidth = widths[key];
+  const onMove = (moveEvent: PointerEvent) => {
+    const nextWidth = clamp(startWidth + moveEvent.clientX - startX, column.minWidth, column.maxWidth);
+    setWidths((current) => ({ ...current, [key]: nextWidth }));
+  };
+  listenForDrag(onMove);
+}
+
+function startRowResize(
+  code: string,
+  event: React.PointerEvent<HTMLButtonElement>,
+  heights: Record<string, number>,
+  setHeights: React.Dispatch<React.SetStateAction<Record<string, number>>>,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  const startY = event.clientY;
+  const startHeight = heights[code] ?? 30;
+  const onMove = (moveEvent: PointerEvent) => {
+    setHeights((current) => ({ ...current, [code]: clamp(startHeight + moveEvent.clientY - startY, 24, 90) }));
+  };
+  listenForDrag(onMove);
+}
+
+function sortRankingItems(
+  items: InvestorRankingItem[],
+  sortState: { key: RankingSortKey; direction: SortDirection },
+) {
+  const multiplier = sortState.direction === "asc" ? 1 : -1;
+  return [...items].sort((left, right) => {
+    const leftValue = rankingSortValue(left, sortState.key);
+    const rightValue = rankingSortValue(right, sortState.key);
+    if (leftValue == null && rightValue == null) return left.rank - right.rank;
+    if (leftValue == null) return 1;
+    if (rightValue == null) return -1;
+    const comparison = typeof leftValue === "string" && typeof rightValue === "string"
+      ? leftValue.localeCompare(rightValue, "ko")
+      : Number(leftValue) - Number(rightValue);
+    return comparison === 0 ? left.rank - right.rank : comparison * multiplier;
+  });
+}
+
+function rankingSortValue(item: InvestorRankingItem, key: RankingSortKey): number | string | null {
+  if (key === "name" || key === "market") return item[key];
+  if (key === "score") return item.score;
+  return item[key];
+}
+
+function metricLabel(metric: RankingMetric) {
+  if (metric === "institution") return "기관";
+  if (metric === "combined") return "합산";
+  return "외국인";
+}
+
+function metricValue(item: InvestorRankingItem, metric: RankingMetric) {
+  if (metric === "institution") return item.institution_change_ratio;
+  if (metric === "combined") return item.combined_change_ratio;
+  return item.foreign_change_ratio;
+}
+
+function ratio(value: number | null | undefined) {
+  if (value == null) return "-";
+  return `${value > 0 ? "+" : ""}${value.toFixed(4)}%`;
+}
+
+function percent(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return "-";
+  return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function themeCount(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value) ? "-" : fmt(value);
+}
+
+function numberClass(value: number | null | undefined) {
+  if (value == null || value === 0) return "";
+  return value > 0 ? "up" : "down";
+}
+
 function SettingsDialog({
   current,
   onClose,
@@ -153,7 +836,7 @@ function SettingsDialog({
   const [form, setForm] = useState<KiwoomSettingsPayload>({
     app_key: "",
     secret_key: "",
-    account_no: current?.account_no ?? "",
+    account_no: "",
     env: current?.env ?? "real",
     base_url: "",
   });
@@ -211,6 +894,7 @@ function SettingsDialog({
           <span className={current?.configured ? "dot ok-dot" : "dot warn-dot"} />
           {current?.configured ? "저장된 키가 있습니다." : "아직 저장된 키가 없습니다."}
           {current?.app_key_masked && <em>앱키 {current.app_key_masked}</em>}
+          {current?.account_no && <em>계좌 {current.account_no}</em>}
           {current?.base_url && <em>{current.env} {current.base_url}</em>}
         </div>
 
@@ -225,7 +909,7 @@ function SettingsDialog({
           </label>
           <label>
             <span>계좌번호</span>
-            <input value={form.account_no} onChange={(event) => setForm({ ...form, account_no: event.target.value })} placeholder="선택 입력" autoComplete="off" />
+            <input value={form.account_no} onChange={(event) => setForm({ ...form, account_no: event.target.value })} placeholder={current?.account_no ? "변경 시 입력 (기존 유지)" : "선택 입력"} autoComplete="off" />
           </label>
           <label>
             <span>환경</span>
@@ -348,10 +1032,10 @@ function Summary({ dashboard }: { dashboard: Dashboard }) {
         <h1>{stock.name}</h1>
         <p>{stock.code} · {stock.market} · {stock.sector ?? "업종 없음"}</p>
       </div>
-      <Metric label="현재가" value={fmt(summary.close)} accent={(summary.change ?? 0) >= 0 ? "up" : "down"} />
+      <Metric label="현재가 · 원" value={price(summary.close)} accent={(summary.change ?? 0) >= 0 ? "up" : "down"} />
       <Metric label="등락률" value={summary.change_rate == null ? "-" : `${summary.change_rate > 0 ? "+" : ""}${summary.change_rate}%`} accent={(summary.change ?? 0) >= 0 ? "up" : "down"} />
-      <Metric label="거래량" value={fmt(summary.volume)} />
-      <Metric label="거래대금" value={money(summary.trading_value)} />
+      <Metric label="거래량 · 주" value={shares(summary.volume)} />
+      <Metric label="거래대금(원화)" value={moneyFromMillionWon(summary.trading_value)} />
       <Metric label="회전률" value={summary.turnover_rate == null ? "-" : `${summary.turnover_rate}%`} />
       <div className="description">
         <strong>{statusText(data_quality)}</strong>
@@ -393,7 +1077,7 @@ function PriceChart({
   return (
     <section className="panel chart-panel" style={{ height }}>
       <div className="panel-title chart-title">
-        <span>{timeframeLabel(timeframe)} 차트 · MA 5/10/20/60/120 · 과거 {dashboard.ohlcv.length}개</span>
+        <span className="chart-title-copy">{timeframeLabel(timeframe)} 가격·거래량 차트 · 과거 {dashboard.ohlcv.length}개</span>
         <div className="timeframe-tabs">
           {chartTimeframes.map((item) => (
             <button
@@ -407,11 +1091,34 @@ function PriceChart({
           ))}
         </div>
         <span className="chart-legend">
-          <i className="ma5" />5 <i className="ma10" />10 <i className="ma20" />20 <i className="ma60" />60 <i className="ma120" />120
+          <span><i className="ma5" />이평 5</span>
+          <span><i className="ma10" />이평 10</span>
+          <span><i className="ma20" />이평 20</span>
+          <span><i className="ma60" />이평 60</span>
+          <span><i className="ma120" />이평 120</span>
         </span>
       </div>
+      <ChartStats rows={dashboard.ohlcv} />
       <TradingChart dashboard={dashboard} />
     </section>
+  );
+}
+
+function ChartStats({ rows }: { rows: Ohlcv[] }) {
+  const latest = rows[rows.length - 1];
+  const first = rows[0];
+  const high = Math.max(...rows.map((row) => row.high));
+  const low = Math.min(...rows.map((row) => row.low));
+  const averageVolume = rows.reduce((sum, row) => sum + row.volume, 0) / rows.length;
+  const periodReturn = first?.close ? ((latest.close / first.close) - 1) * 100 : null;
+  return (
+    <div className="chart-stats">
+      <span><small>기간 고가</small><strong>{price(high)}</strong></span>
+      <span><small>기간 저가</small><strong>{price(low)}</strong></span>
+      <span><small>기간 수익률</small><strong className={numberClass(periodReturn)}>{percent(periodReturn)}</strong></span>
+      <span><small>평균 거래량</small><strong>{shares(averageVolume)}</strong></span>
+      <span><small>최근 거래대금(원화)</small><strong>{moneyFromMillionWon(latest?.trading_value)}</strong></span>
+    </div>
   );
 }
 
@@ -438,7 +1145,13 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
       },
       rightPriceScale: {
         borderColor: "#a9b7c6",
+        minimumWidth: 96,
         scaleMargins: { top: 0.08, bottom: 0.28 },
+      },
+      leftPriceScale: {
+        borderColor: "#a9b7c6",
+        minimumWidth: 96,
+        scaleMargins: { top: 0.78, bottom: 0 },
       },
       timeScale: {
         borderColor: "#a9b7c6",
@@ -453,7 +1166,7 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
         horzLine: { color: "#5f7287", labelBackgroundColor: "#315f99" },
       },
       localization: {
-        priceFormatter: (price: number) => price.toLocaleString("ko-KR"),
+        priceFormatter: (value: number) => price(value),
       },
       handleScroll: {
         mouseWheel: true,
@@ -477,12 +1190,11 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
       wickDownColor: "#26384b",
     });
     const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceFormat: { type: "volume" },
-      priceScaleId: "",
+      priceFormat: { type: "custom", formatter: compactShares, minMove: 1 },
+      priceScaleId: "left",
       color: "#7f97b0",
-    });
-    volumeSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.78, bottom: 0 },
+      priceLineVisible: false,
+      lastValueVisible: false,
     });
 
     const rows = dashboard.ohlcv;
@@ -527,8 +1239,8 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
       const date = typeof param.time === "string" ? param.time : String(param.time);
       tooltip.innerHTML = `
         <strong>${date}</strong>
-        <span>시 ${fmt(candle.open)} · 고 ${fmt(candle.high)} · 저 ${fmt(candle.low)} · 종 ${fmt(candle.close)}</span>
-        <span>거래량 ${fmt(volume?.value)} · 거래대금 ${money(rowByDate(rows, date)?.trading_value)}</span>
+        <span>시 ${price(candle.open)} · 고 ${price(candle.high)} · 저 ${price(candle.low)} · 종 ${price(candle.close)}</span>
+        <span>거래량 ${shares(volume?.value)} · 거래대금 ${moneyFromMillionWon(rowByDate(rows, date)?.trading_value)}</span>
       `;
       const left = Math.min(Math.max(param.point.x + 14, 8), container.clientWidth - 270);
       const top = Math.min(Math.max(param.point.y + 14, 8), container.clientHeight - 78);
@@ -593,9 +1305,9 @@ function DailyTradingPanel({ dashboard }: { dashboard: Dashboard }) {
         <thead>
           <tr>
             <th>일자</th>
-            <th>종가</th>
-            <th>거래량</th>
-            <th>거래대금</th>
+            <th>종가(원)</th>
+            <th>거래량(주)</th>
+            <th>거래대금(원화)</th>
             <th>회전률</th>
           </tr>
         </thead>
@@ -603,9 +1315,9 @@ function DailyTradingPanel({ dashboard }: { dashboard: Dashboard }) {
           {dashboard.ohlcv.slice().reverse().map((row) => (
             <tr key={row.date}>
               <td>{row.date}</td>
-              <td>{fmt(row.close)}</td>
-              <td>{fmt(row.volume)}</td>
-              <td>{money(row.trading_value)}</td>
+              <td>{price(row.close)}</td>
+              <td>{shares(row.volume)}</td>
+              <td>{moneyFromMillionWon(row.trading_value)}</td>
               <td>{listedShares ? `${((row.volume / listedShares) * 100).toFixed(4)}%` : "-"}</td>
             </tr>
           ))}
@@ -616,14 +1328,40 @@ function DailyTradingPanel({ dashboard }: { dashboard: Dashboard }) {
 }
 
 function ThemePanel({ dashboard }: { dashboard: Dashboard }) {
+  const themes = (dashboard.themes ?? []).filter((theme) => Boolean(theme.name?.trim())).slice(0, 8);
+  const themeStatus = dashboard.data_quality.theme_status;
+  const emptyMessage = themeStatus === "ok"
+    ? "이 종목에 대해 확인된 관련 테마가 없습니다."
+    : panelMessage(dashboard.data_quality, "theme_status");
+
   return (
     <section className="panel theme-panel">
-      <div className="panel-title">종목 설명 · 테마</div>
+      <div className="panel-title">종목 개요 · 관련 테마</div>
       <p className="theme-description">{dashboard.summary.description}</p>
+      {themes.length > 0 && <div className="theme-context">키움 API 관련 테마 · 최대 8개 표시</div>}
       <div className="theme-list">
-        {dashboard.themes && dashboard.themes.length > 0
-          ? dashboard.themes.slice(0, 8).map((theme) => <span key={theme.code}>{theme.name}</span>)
-          : <span>테마 정보 없음</span>}
+        {themes.length > 0
+          ? themes.map((theme) => (
+            <article className="theme-card" key={theme.code}>
+              <div className="theme-card-heading">
+                <strong>{theme.name}</strong>
+              </div>
+              {theme.stock_count != null && Number.isFinite(theme.stock_count) && (
+                <div className="theme-card-meta">구성 {fmt(theme.stock_count)}종목</div>
+              )}
+              <div className="theme-card-stats">
+                <span className={numberClass(theme.change_rate)}>등락률 {percent(theme.change_rate)}</span>
+                <span>기간 수익률 {percent(theme.period_return)}</span>
+              </div>
+              {(theme.rising_count != null || theme.falling_count != null) && (
+                <small className="theme-card-breadth">
+                  상승 {themeCount(theme.rising_count)} · 하락 {themeCount(theme.falling_count)}
+                </small>
+              )}
+              {theme.main_stock?.trim() && <small className="theme-card-breadth">대표 종목 {theme.main_stock.trim()}</small>}
+            </article>
+          ))
+          : <span className="theme-empty">{emptyMessage}</span>}
       </div>
     </section>
   );
@@ -641,11 +1379,11 @@ function InvestorPanel({ dashboard }: { dashboard: Dashboard }) {
         <thead>
           <tr>
             <th>기간</th>
-            <th>외국인 수량</th>
-            <th>외국인 금액</th>
+            <th>외국인 수량(주)</th>
+            <th>외국인 금액(원화)</th>
             <th>비율</th>
-            <th>기관 수량</th>
-            <th>기관 금액</th>
+            <th>기관 수량(주)</th>
+            <th>기관 금액(원화)</th>
             <th>비율</th>
           </tr>
         </thead>
@@ -655,11 +1393,11 @@ function InvestorPanel({ dashboard }: { dashboard: Dashboard }) {
             return (
               <tr key={period}>
                 <td>{period}일</td>
-                <td className={row.foreign_qty >= 0 ? "up" : "down"}>{fmt(row.foreign_qty)}</td>
-                <td className={row.foreign_value >= 0 ? "up" : "down"}>{money(row.foreign_value)}</td>
+                <td className={row.foreign_qty >= 0 ? "up" : "down"}>{shares(row.foreign_qty)}</td>
+                <td className={row.foreign_value >= 0 ? "up" : "down"}>{moneyFromMillionWon(row.foreign_value)}</td>
                 <td>{row.foreign_ratio}%</td>
-                <td className={row.institution_qty >= 0 ? "up" : "down"}>{fmt(row.institution_qty)}</td>
-                <td className={row.institution_value >= 0 ? "up" : "down"}>{money(row.institution_value)}</td>
+                <td className={row.institution_qty >= 0 ? "up" : "down"}>{shares(row.institution_qty)}</td>
+                <td className={row.institution_value >= 0 ? "up" : "down"}>{moneyFromMillionWon(row.institution_value)}</td>
                 <td>{row.institution_ratio}%</td>
               </tr>
             );
@@ -682,31 +1420,31 @@ function ProgramPanel({ dashboard }: { dashboard: Dashboard }) {
       <div className="panel-title">프로그램매매 비차익 추이</div>
       <div className="program-summary">
         {periods.map((period) => (
-          <span key={period}>{period}일 {fmt(dashboard.program_summary[period]?.net_amount_m)}백만</span>
+          <span key={period}>{period}일 {moneyFromMillionWon(dashboard.program_summary[period]?.net_amount_m)}</span>
         ))}
       </div>
       <table>
         <thead>
           <tr>
             <th>일자</th>
-            <th>현재가</th>
+            <th>현재가(원)</th>
             <th>등락률</th>
-            <th>거래량</th>
-            <th>매도</th>
-            <th>매수</th>
-            <th>순매수</th>
+            <th>거래량(주)</th>
+            <th>매도(원화)</th>
+            <th>매수(원화)</th>
+            <th>순매수(원화)</th>
           </tr>
         </thead>
         <tbody>
           {dashboard.program_trading.slice(-18).reverse().map((row) => (
             <tr key={row.date}>
               <td>{row.date.slice(5)}</td>
-              <td>{fmt(row.close)}</td>
+              <td>{price(row.close)}</td>
               <td className={(row.change_rate ?? 0) >= 0 ? "up" : "down"}>{row.change_rate == null ? "-" : `${row.change_rate}%`}</td>
-              <td>{fmt(row.volume)}</td>
-              <td>{fmt(row.sell_amount_m)}</td>
-              <td>{fmt(row.buy_amount_m)}</td>
-              <td className={row.net_amount_m >= 0 ? "up" : "down"}>{fmt(row.net_amount_m)}</td>
+              <td>{shares(row.volume)}</td>
+              <td>{moneyFromMillionWon(row.sell_amount_m)}</td>
+              <td>{moneyFromMillionWon(row.buy_amount_m)}</td>
+              <td className={row.net_amount_m >= 0 ? "up" : "down"}>{moneyFromMillionWon(row.net_amount_m)}</td>
             </tr>
           ))}
         </tbody>
@@ -783,10 +1521,40 @@ function fmt(value: number | null | undefined) {
   return Math.round(value).toLocaleString("ko-KR");
 }
 
-function money(value: number | null | undefined) {
+function price(value: number | null | undefined) {
+  return value == null ? "-" : `${fmt(value)}원`;
+}
+
+function shares(value: number | null | undefined) {
+  return value == null ? "-" : `${fmt(value)}주`;
+}
+
+function compactShares(value: number | null | undefined) {
   if (value == null) return "-";
-  if (Math.abs(value) >= 100_000_000) return `${(value / 100_000_000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}억`;
-  return fmt(value);
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
+  const compact = (divisor: number) => Number((absolute / divisor).toFixed(1)).toLocaleString("ko-KR", { maximumFractionDigits: 1 });
+  if (absolute >= 100_000_000) return `${sign}${compact(100_000_000)}억주`;
+  if (absolute >= 10_000) return `${sign}${compact(10_000)}만주`;
+  return `${sign}${Math.round(absolute).toLocaleString("ko-KR")}주`;
+}
+
+function moneyWon(value: number | null | undefined) {
+  return value == null ? "-" : compactWon(value);
+}
+
+function moneyFromMillionWon(value: number | null | undefined) {
+  if (value == null) return "-";
+  return compactWon(value * 1_000_000);
+}
+
+function compactWon(value: number) {
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
+  if (absolute >= 1_000_000_000_000) return `${sign}${(absolute / 1_000_000_000_000).toFixed(2)}조원`;
+  if (absolute >= 100_000_000) return `${sign}${(absolute / 100_000_000).toFixed(1)}억원`;
+  if (absolute >= 10_000) return `${sign}${(absolute / 10_000).toFixed(1)}만원`;
+  return `${sign}${Math.round(absolute).toLocaleString("ko-KR")}원`;
 }
 
 function timeframeLabel(timeframe: ChartTimeframe) {

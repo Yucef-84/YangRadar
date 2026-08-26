@@ -1,12 +1,42 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import math
+import threading
+import time
 from typing import Any
 
 import requests
 
 from ..config import Settings, get_settings
 from .stock_universe import LOCAL_STOCKS, local_stock
+
+
+DEFAULT_KIWOOM_REQUEST_INTERVAL = 0.275
+DEFAULT_KIWOOM_RATE_LIMIT_RETRIES = 3
+DEFAULT_KIWOOM_RATE_LIMIT_BACKOFF = (1.0, 2.0, 4.0)
+INVESTOR_READINESS_SAMPLE_CODES = ("005930", "000660", "035720")
+
+_kiwoom_rate_limit_lock = threading.Lock()
+_kiwoom_last_request_at: float | None = None
+
+
+def _wait_for_kiwoom_request_slot(interval: float) -> None:
+    """Reserve the next process-wide Kiwoom TR request slot.
+
+    The lock is held only while calculating the delay and recording the actual
+    send time.  HTTP response time is not included, so a slow request does not
+    block other threads from calculating their next slot unnecessarily.
+    """
+    global _kiwoom_last_request_at
+
+    with _kiwoom_rate_limit_lock:
+        now = time.monotonic()
+        if _kiwoom_last_request_at is not None:
+            wait = interval - (now - _kiwoom_last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+        _kiwoom_last_request_at = time.monotonic()
 
 
 class KiwoomApiError(Exception):
@@ -17,10 +47,21 @@ class KiwoomApiError(Exception):
 
 
 class KiwoomRestProvider:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        request_interval: float = DEFAULT_KIWOOM_REQUEST_INTERVAL,
+        rate_limit_retries: int = DEFAULT_KIWOOM_RATE_LIMIT_RETRIES,
+        rate_limit_backoff: tuple[float, ...] = DEFAULT_KIWOOM_RATE_LIMIT_BACKOFF,
+    ):
         self.settings = settings or get_settings()
         self._token: str | None = None
         self._token_expires_at: datetime | None = None
+        self._request_interval = max(0.0, float(request_interval))
+        self._rate_limit_retries = max(0, int(rate_limit_retries))
+        normalized_backoff = tuple(max(0.0, float(delay)) for delay in rate_limit_backoff)
+        self._rate_limit_backoff = normalized_backoff or DEFAULT_KIWOOM_RATE_LIMIT_BACKOFF
 
     @property
     def configured(self) -> bool:
@@ -60,28 +101,204 @@ class KiwoomRestProvider:
 
     def list_stocks(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not self.configured:
-            return LOCAL_STOCKS, self._quality("stock_list", "api_not_configured", "키움 REST API 키가 설정되지 않아 로컬 종목 목록만 사용합니다.")
-        market_requests = [("0", "KOSPI"), ("10", "KOSDAQ")]
+            return [dict(stock, security_type="STOCK") for stock in LOCAL_STOCKS], self._quality("stock_list", "api_not_configured", "키움 REST API 키가 설정되지 않아 로컬 종목 목록만 사용합니다.")
+        # ka10099 uses 0=KOSPI, 10=KOSDAQ, and 8=ETF.
+        market_requests = [("0", "KOSPI"), ("10", "KOSDAQ"), ("8", "ETF")]
         stocks: list[dict[str, Any]] = []
         messages: list[str] = []
         try:
             for market_code, fallback_market in market_requests:
                 try:
                     data = self._post("/api/dostk/stkinfo", "ka10099", {"mrkt_tp": market_code})
-                    stocks.extend(self._parse_stock_list(data, fallback_market))
+                    market_stocks = self._parse_stock_list(data, fallback_market)
+                    if not market_stocks:
+                        messages.append(f"{fallback_market}: 종목 목록이 비어 있습니다.")
+                        continue
+                    stocks.extend(market_stocks)
                 except KiwoomApiError as exc:
                     messages.append(f"{fallback_market}: {exc.message}")
 
-            deduped = {stock["code"]: stock for stock in stocks}
+            deduped: dict[str, dict[str, Any]] = {}
+            for stock in stocks:
+                existing = deduped.get(stock["code"])
+                if existing and existing.get("security_type") == "ETF" and stock.get("security_type") != "ETF":
+                    continue
+                deduped[stock["code"]] = stock
             stocks = sorted(deduped.values(), key=lambda item: (item["market"], item["name"], item["code"]))
             if stocks:
                 quality = self._quality("stock_list", "ok" if not messages else "partial", "키움 REST 종목 목록을 수신했습니다.")
+                quality["complete"] = not messages
                 if messages:
                     quality["message"] += " 일부 시장은 실패했습니다: " + " / ".join(messages)
                 return stocks, quality
-            return LOCAL_STOCKS, self._quality("stock_list", "unavailable", "키움 종목 목록 응답을 해석하지 못해 로컬 목록을 사용합니다.")
+            return [dict(stock, security_type="STOCK") for stock in LOCAL_STOCKS], self._quality("stock_list", "unavailable", "키움 종목 목록 응답을 해석하지 못해 로컬 목록을 사용합니다.")
         except KiwoomApiError as exc:
-            return LOCAL_STOCKS, self._quality("stock_list", exc.code, exc.message)
+            return [dict(stock, security_type="STOCK") for stock in LOCAL_STOCKS], self._quality("stock_list", exc.code, exc.message)
+
+    def collect_investor_daily(
+        self,
+        stocks: list[dict[str, Any]],
+        target_date: str,
+        progress: Any | None = None,
+        batch_callback: Any | None = None,
+        *,
+        include_values: bool = False,
+        include_holdings: bool = True,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if not self.configured:
+            return [], self._quality("investor_daily", "api_not_configured", "키움 REST API 키가 설정되지 않아 전체 수급을 수집할 수 없습니다.")
+
+        rows: list[dict[str, Any]] = []
+        batch: list[dict[str, Any]] = []
+        failures: list[str] = []
+        total = len(stocks)
+        for index, stock in enumerate(stocks, start=1):
+            code = str(stock.get("code") or "").zfill(6)
+            try:
+                close = _to_abs_number(stock.get("last_price"))
+                listed_shares = int(_to_abs_number(stock.get("listed_shares")) or 0)
+                if not close or not listed_shares:
+                    quote = self._get_quote(code)
+                    close = quote.get("close")
+                    listed_shares = int(quote.get("listed_shares") or listed_shares or 0)
+                if not close or not listed_shares:
+                    raise KiwoomApiError("missing_data", "종가 또는 상장주식수가 없습니다.")
+                investor = self._get_investor_day(code, target_date, include_values=include_values)
+                if not investor:
+                    raise KiwoomApiError("missing_data", "해당 거래일 투자자 데이터가 없습니다.")
+                holding: dict[str, Any] = {}
+                if include_holdings:
+                    try:
+                        holding = self._get_foreign_holding(code, investor["date"]) or {}
+                        if holding.get("date") != investor["date"]:
+                            # Do not combine a holding snapshot from another day with the flow row.
+                            holding = {}
+                    except KiwoomApiError:
+                        # Holding-rate data is supplementary; daily flow can still be ranked.
+                        holding = {}
+                foreign_qty = float(investor.get("foreign_qty") or 0)
+                institution_qty = float(investor.get("institution_qty") or 0)
+                market_cap = float(close) * listed_shares
+                row = {
+                    "trade_date": investor["date"],
+                    "code": code,
+                    "close": close,
+                    "listed_shares": listed_shares,
+                    "market_cap": market_cap,
+                    "foreign_net_qty": foreign_qty,
+                    "foreign_net_value": investor.get("foreign_value"),
+                    "institution_net_qty": institution_qty,
+                    "institution_net_value": investor.get("institution_value"),
+                    "foreign_change_ratio": _ratio(foreign_qty, listed_shares),
+                    "institution_change_ratio": _ratio(institution_qty, listed_shares),
+                    "combined_change_ratio": _ratio(foreign_qty + institution_qty, listed_shares),
+                    "foreign_holding_qty": (
+                        holding.get("holding_qty")
+                        if holding.get("holding_qty") is not None
+                        else investor.get("foreign_holding_qty")
+                    ),
+                    "foreign_holding_ratio": (
+                        holding.get("holding_ratio")
+                        if holding.get("holding_ratio") is not None
+                        else investor.get("foreign_holding_ratio")
+                    ),
+                    "data_status": "ok",
+                }
+                rows.append(row)
+                batch.append(row)
+                if batch_callback and len(batch) >= 50:
+                    batch_callback(batch)
+                    batch = []
+            except KiwoomApiError as exc:
+                failures.append(f"{code}: {exc.message}")
+            except (TypeError, ValueError) as exc:
+                failures.append(f"{code}: 데이터 변환 실패({exc})")
+            if progress:
+                progress(index, total, len(rows), len(failures))
+
+        if batch_callback and batch:
+            batch_callback(batch)
+
+        status = "ok" if rows and not failures else "partial" if rows else "unavailable"
+        message = f"일별 수급 {len(rows)}개 종목을 저장할 수 있습니다."
+        if failures:
+            message += f" 실패 {len(failures)}개. 예: " + " / ".join(failures[:3])
+        return rows, self._quality("investor_daily", status, message)
+
+    def check_investor_readiness(self, target_date: str) -> dict[str, Any]:
+        """Check whether the requested trading day's investor data is available.
+
+        This intentionally probes only a few liquid common stocks.  It must stay
+        cheap enough to run periodically while the market's end-of-day data is
+        propagating, so it does not enumerate the stock universe or request any
+        supplementary quote/holding data.
+        """
+        sample_codes = INVESTOR_READINESS_SAMPLE_CODES
+        base: dict[str, Any] = {
+            "ready": False,
+            "target_date": target_date,
+            "checked": False,
+            "ready_count": 0,
+            "sample_count": len(sample_codes),
+            "samples": [],
+        }
+        if not self.configured:
+            base["status"] = "api_not_configured"
+            return base
+
+        checked_at = datetime.now().isoformat(timespec="seconds")
+        samples: list[dict[str, Any]] = []
+        ready_count = 0
+        error_count = 0
+        for code in sample_codes:
+            sample: dict[str, Any] = {"code": code, "actual_date": None, "status": "error"}
+            try:
+                # include_values=False guarantees one ka10060 quantity request
+                # per sample and inherits the shared limiter/retry behavior in
+                # _post().  _get_investor_day may return a prior date; readiness
+                # is strict and accepts only an exact target-date row.
+                investor = self._get_investor_day(code, target_date, include_values=False)
+                actual_date = investor.get("date") if investor else None
+                sample["actual_date"] = actual_date
+                if actual_date == target_date:
+                    sample["status"] = "ready"
+                    ready_count += 1
+                elif actual_date:
+                    sample["status"] = "stale"
+                else:
+                    sample["status"] = "missing"
+            except KiwoomApiError as exc:
+                # Keep diagnostics safe for the status endpoint: expose the
+                # provider error code, never credentials or request details.
+                sample["error_code"] = exc.code
+                sample["error"] = exc.code
+                error_count += 1
+            except Exception:
+                # A single transient/malformed sample must not prevent the
+                # other probes from determining readiness.
+                sample["error_code"] = "unexpected_error"
+                sample["error"] = "unexpected_error"
+                error_count += 1
+            samples.append(sample)
+
+        if error_count == len(sample_codes):
+            status = "error"
+        elif ready_count >= 2:
+            status = "ready"
+        else:
+            status = "waiting_data"
+        base.update(
+            {
+                "ready": ready_count >= 2,
+                "checked": True,
+                "checked_at": checked_at,
+                "ready_count": ready_count,
+                "error_count": error_count,
+                "samples": samples,
+                "status": status,
+            }
+        )
+        return base
 
     def dashboard(self, code: str, lookback: int, timeframe: str = "daily") -> dict[str, Any]:
         stock = local_stock(code)
@@ -142,9 +359,10 @@ class KiwoomRestProvider:
 
         try:
             themes = self._get_themes_for_stock(code)
-            data_quality["theme_status"] = "ok" if themes else "unavailable"
+            data_quality["theme_status"] = "ok"
         except KiwoomApiError as exc:
-            data_quality["theme_status"] = "unavailable"
+            data_quality["theme_status"] = exc.code
+            data_quality["messages"].append(exc.message)
 
         try:
             market_adr = self._get_market_adr()
@@ -197,6 +415,9 @@ class KiwoomRestProvider:
             volume = _to_abs_number(_first(row, ["trde_qty", "acml_vol", "volume"])) or 0
             if not date or close is None:
                 continue
+            trading_value = _to_abs_number(_first(row, ["trde_prica", "acml_tr_pbmn", "trading_value"]))
+            if trading_value is None:
+                trading_value = (close * volume) / 1_000_000
             parsed.append(
                 {
                     "date": date,
@@ -205,7 +426,7 @@ class KiwoomRestProvider:
                     "low": _to_abs_number(_first(row, ["low_pric", "stck_lwpr", "low"])) or close,
                     "close": close,
                     "volume": volume,
-                    "trading_value": _to_abs_number(_first(row, ["trde_prica", "acml_tr_pbmn", "trading_value"])) or close * volume,
+                    "trading_value": trading_value,
                 }
             )
         parsed.sort(key=lambda item: item["date"])
@@ -233,17 +454,64 @@ class KiwoomRestProvider:
         for row in value_rows:
             target = by_date.setdefault(
                 row["date"],
-                {"date": row["date"], "foreign_qty": 0, "foreign_value": 0, "institution_qty": 0, "institution_value": 0},
+                {"date": row["date"], "foreign_qty": None, "foreign_value": None, "institution_qty": None, "institution_value": None},
             )
-            target["foreign_value"] = row["foreign_qty"] or row["foreign_value"]
-            target["institution_value"] = row["institution_qty"] or row["institution_value"]
+            target["foreign_value"] = (
+                row["foreign_qty"] if row["foreign_qty"] is not None else row["foreign_value"]
+            )
+            target["institution_value"] = (
+                row["institution_qty"] if row["institution_qty"] is not None else row["institution_value"]
+            )
 
         parsed = list(by_date.values())
         parsed.sort(key=lambda item: item["date"])
         return parsed
 
-    def _parse_investor_rows(self, data: dict[str, Any]) -> list[dict[str, Any]]:
-        rows = _find_first_list(data, ["stk_invsr_orgn_chart", "output", "list"])
+    def _get_investor_day(self, code: str, target_date: str, *, include_values: bool = False) -> dict[str, Any] | None:
+        data = self._post(
+            "/api/dostk/chart",
+            "ka10060",
+            {"dt": target_date.replace("-", ""), "stk_cd": code, "amt_qty_tp": "2", "trde_tp": "0", "unit_tp": "1"},
+        )
+        qty_rows = self._parse_investor_rows(data)
+        if not qty_rows:
+            return None
+        qty_rows.sort(key=lambda item: item["date"])
+        target = next((row for row in qty_rows if row["date"] == target_date), None)
+        if target is None:
+            target = _latest_on_or_before(qty_rows, target_date)
+        if target is None:
+            return None
+        if include_values:
+            try:
+                value_data = self._post(
+                    "/api/dostk/chart",
+                    "ka10060",
+                    {"dt": target_date.replace("-", ""), "stk_cd": code, "amt_qty_tp": "1", "trde_tp": "0", "unit_tp": "1"},
+                )
+                value_rows = self._parse_investor_rows(value_data)
+                value = next((row for row in value_rows if row["date"] == target["date"]), None)
+                if value:
+                    target = {
+                        **target,
+                        "foreign_value": (
+                            value.get("foreign_qty")
+                            if value.get("foreign_qty") is not None
+                            else value.get("foreign_value")
+                        ),
+                        "institution_value": (
+                            value.get("institution_qty")
+                            if value.get("institution_qty") is not None
+                            else value.get("institution_value")
+                        ),
+                    }
+            except KiwoomApiError:
+                pass
+        return target
+
+    def _get_foreign_holding(self, code: str, target_date: str) -> dict[str, Any] | None:
+        data = self._post("/api/dostk/frgnistt", "ka10008", {"stk_cd": code})
+        rows = _find_first_list(data, ["stk_frgnr", "output", "list"])
         parsed: list[dict[str, Any]] = []
         for row in rows:
             date = _format_date(_first(row, ["dt", "date"]))
@@ -252,25 +520,50 @@ class KiwoomRestProvider:
             parsed.append(
                 {
                     "date": date,
-                    "foreign_qty": _to_number(
-                        _first(
-                            row,
-                            ["frgnr_invsr", "frgnr_netprps_qty", "for_netprps_qty", "frgnr", "frgn", "frgnr_trde_qty", "foreign_qty"],
-                        )
-                    )
-                    or 0,
-                    "foreign_value": _to_number(
-                        _first(row, ["frgnr_netprps_amt", "frgnr_trde_amt", "for_netprps_amt", "frgn_amt", "foreign_value"])
-                    )
-                    or 0,
-                    "institution_qty": _to_number(
-                        _first(row, ["orgn", "orgn_netprps_qty", "inst_netprps_qty", "inst", "orgn_trde_qty", "institution_qty"])
-                    )
-                    or 0,
-                    "institution_value": _to_number(
-                        _first(row, ["orgn_netprps_amt", "inst_netprps_amt", "orgn_trde_amt", "inst_amt", "institution_value"])
-                    )
-                    or 0,
+                    "holding_qty": _to_abs_number(_first(row, ["poss_stkcnt", "foreign_holding_qty"])),
+                    "holding_ratio": _to_number(_first(row, ["wght", "foreign_holding_ratio"])),
+                }
+            )
+        if not parsed:
+            return None
+        parsed.sort(key=lambda item: item["date"])
+        target = next((row for row in parsed if row["date"] == target_date), None)
+        return target if target is not None else _latest_on_or_before(parsed, target_date)
+
+    def _parse_investor_rows(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        rows = _find_first_list(data, ["stk_invsr_orgn_chart", "output", "list"])
+        parsed: list[dict[str, Any]] = []
+        for row in rows:
+            date = _format_date(_first(row, ["dt", "date"]))
+            if not date:
+                continue
+            foreign_qty = _number_from_keys(
+                row,
+                ["frgnr_invsr", "frgnr_netprps_qty", "for_netprps_qty", "frgnr", "frgn", "frgnr_trde_qty", "foreign_qty"],
+            )
+            institution_qty = _number_from_keys(
+                row,
+                ["orgn", "orgn_netprps_qty", "inst_netprps_qty", "inst", "orgn_trde_qty", "institution_qty"],
+            )
+            if foreign_qty is None or institution_qty is None:
+                continue
+            parsed.append(
+                {
+                    "date": date,
+                    "foreign_qty": foreign_qty,
+                    "foreign_value": _number_from_keys(
+                        row, ["frgnr_netprps_amt", "frgnr_trde_amt", "for_netprps_amt", "frgn_amt", "foreign_value"]
+                    ),
+                    "institution_qty": institution_qty,
+                    "institution_value": _number_from_keys(
+                        row, ["orgn_netprps_amt", "inst_netprps_amt", "orgn_trde_amt", "inst_amt", "institution_value"]
+                    ),
+                    "foreign_holding_qty": _to_abs_number(
+                        _first(row, ["poss_stkcnt", "foreign_holding_qty", "frgnr_poss_stkcnt"])
+                    ),
+                    "foreign_holding_ratio": _to_number(
+                        _first(row, ["wght", "foreign_holding_ratio", "frgnr_wght"])
+                    ),
                 }
             )
         parsed.sort(key=lambda item: item["date"])
@@ -320,21 +613,41 @@ class KiwoomRestProvider:
         return parsed
 
     def _get_themes_for_stock(self, code: str) -> list[dict[str, Any]]:
-        data = self._post("/api/dostk/thme", "ka90001", {"qry_tp": "0", "mrkt_tp": "0"})
-        rows = _find_first_list(data, ["theme_group", "thme_group", "output", "list"])
+        # ka90001 supports direct stock-theme lookup (qry_tp=2).  The previous
+        # implementation fetched every theme and then called ka90002 once per
+        # theme, which was both slow and incompatible with the current response
+        # key (thema_grp).
+        data = self._post(
+            "/api/dostk/thme",
+            "ka90001",
+            {
+                "qry_tp": "2",
+                "stk_cd": code,
+                "date_tp": "10",
+                "thema_nm": "",
+                "flu_pl_amt_tp": "1",
+                "stex_tp": "1",
+            },
+        )
+        rows = _find_first_list(data, ["thema_grp", "theme_group", "thme_group", "output", "list"])
         themes: list[dict[str, Any]] = []
-        for row in rows[:200]:
-            theme_code = _first(row, ["theme_cd", "thme_cd", "code"])
-            theme_name = _first(row, ["theme_nm", "thme_nm", "name"])
+        for row in rows:
+            theme_code = _first(row, ["thema_grp_cd", "theme_cd", "thme_cd", "code"])
+            theme_name = _first(row, ["thema_nm", "theme_nm", "thme_nm", "name"])
             if not theme_code or not theme_name:
                 continue
-            try:
-                members = self._post("/api/dostk/thme", "ka90002", {"theme_cd": theme_code})
-            except KiwoomApiError:
-                continue
-            member_rows = _find_first_list(members, ["theme_comp_stk", "thme_comp_stk", "output", "list"])
-            if any(_digits(_first(member, ["stk_cd", "code"])) == code for member in member_rows):
-                themes.append({"code": str(theme_code), "name": str(theme_name)})
+            themes.append(
+                {
+                    "code": str(theme_code),
+                    "name": str(theme_name),
+                    "stock_count": _to_abs_number(_first(row, ["stk_num", "stock_count"])),
+                    "change_rate": _to_number(_first(row, ["flu_rt", "change_rate"])),
+                    "period_return": _to_number(_first(row, ["dt_prft_rt", "period_return"])),
+                    "rising_count": _to_abs_number(_first(row, ["rising_stk_num", "rising_count"])),
+                    "falling_count": _to_abs_number(_first(row, ["fall_stk_num", "falling_count"])),
+                    "main_stock": _first(row, ["main_stk", "main_stock"]),
+                }
+            )
             if len(themes) >= 8:
                 break
         return themes
@@ -418,34 +731,42 @@ class KiwoomRestProvider:
 
     def _post(self, endpoint: str, api_id: str, body: dict[str, Any]) -> dict[str, Any]:
         token = self._token_value()
-        try:
-            response = requests.post(
-                f"{self.settings.kiwoom_base_url}{endpoint}",
-                json=body,
-                headers={
-                    "Content-Type": "application/json;charset=UTF-8",
-                    "authorization": f"Bearer {token}",
-                    "api-id": api_id,
-                    "cont-yn": "N",
-                    "next-key": "",
-                },
-                timeout=10,
-            )
-        except requests.RequestException as exc:
-            raise KiwoomApiError("network_error", f"{api_id} 요청 실패: {exc}") from exc
-        data = _response_json(response)
-        if response.status_code == 401:
-            self._token = None
-            self._token_expires_at = None
-            raise KiwoomApiError("token_expired", "키움 접근토큰이 만료되었거나 거부되었습니다.")
-        if response.status_code == 429:
-            raise KiwoomApiError("rate_limited", "키움 요청 제한에 걸렸습니다.")
-        if response.status_code >= 400 or str(data.get("return_code", "0")) not in {"0", ""}:
-            raise KiwoomApiError("api_error", data.get("return_msg") or f"{api_id} HTTP {response.status_code}")
-        return data
+        for retry_index in range(self._rate_limit_retries + 1):
+            _wait_for_kiwoom_request_slot(self._request_interval)
+            try:
+                response = requests.post(
+                    f"{self.settings.kiwoom_base_url}{endpoint}",
+                    json=body,
+                    headers={
+                        "Content-Type": "application/json;charset=UTF-8",
+                        "authorization": f"Bearer {token}",
+                        "api-id": api_id,
+                        "cont-yn": "N",
+                        "next-key": "",
+                    },
+                    timeout=10,
+                )
+            except requests.RequestException as exc:
+                raise KiwoomApiError("network_error", f"{api_id} 요청 실패: {exc}") from exc
+            data = _response_json(response)
+            if response.status_code == 401:
+                self._token = None
+                self._token_expires_at = None
+                raise KiwoomApiError("token_expired", "키움 접근토큰이 만료되었거나 거부되었습니다.")
+            if response.status_code == 429:
+                if retry_index >= self._rate_limit_retries:
+                    raise KiwoomApiError("rate_limited", "키움 요청 제한에 걸렸습니다.")
+                backoff_index = min(retry_index, len(self._rate_limit_backoff) - 1)
+                time.sleep(self._rate_limit_backoff[backoff_index])
+                continue
+            if response.status_code >= 400 or str(data.get("return_code", "0")) not in {"0", ""}:
+                raise KiwoomApiError("api_error", data.get("return_msg") or f"{api_id} HTTP {response.status_code}")
+            return data
+
+        raise KiwoomApiError("rate_limited", "키움 요청 제한에 걸렸습니다.")
 
     def _parse_stock_list(self, data: dict[str, Any], fallback_market: str = "KRX") -> list[dict[str, Any]]:
-        rows = _find_first_list(data, ["list", "stk_info", "output", "items"])
+        rows = _find_first_list(data, ["list", "stk_info", "result_list", "output", "items"])
         stocks: list[dict[str, Any]] = []
         for row in rows:
             code = _stock_code(_first(row, ["stk_cd", "code", "isu_cd"]))
@@ -456,9 +777,11 @@ class KiwoomRestProvider:
                 {
                     "code": code.zfill(6),
                     "name": str(name),
-                    "market": str(_first(row, ["marketName", "mrkt_nm", "market", "marketCode"]) or fallback_market),
+                    "market": _market_name(row, fallback_market),
                     "sector": _first(row, ["upName", "upSizeName", "upjong_nm", "sector"]),
                     "listed_shares": _to_abs_number(_first(row, ["listCount", "list_stock_cnt", "listed_shares"])),
+                    "last_price": _to_abs_number(_first(row, ["cur_prc", "close_pric", "now_pric", "prpr", "last_price"])),
+                    "security_type": "ETF" if fallback_market == "ETF" else _security_type(row, name),
                 }
             )
         return stocks
@@ -505,6 +828,28 @@ class DataProvider:
     def build_dashboard(self, code: str, lookback: int, timeframe: str = "daily") -> dict[str, Any]:
         return self.kiwoom.dashboard(code, lookback, timeframe)
 
+    def collect_investor_daily(
+        self,
+        stocks: list[dict[str, Any]],
+        target_date: str,
+        progress: Any | None = None,
+        batch_callback: Any | None = None,
+        *,
+        include_values: bool = False,
+        include_holdings: bool = True,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return self.kiwoom.collect_investor_daily(
+            stocks,
+            target_date,
+            progress,
+            batch_callback,
+            include_values=include_values,
+            include_holdings=include_holdings,
+        )
+
+    def check_investor_readiness(self, target_date: str) -> dict[str, Any]:
+        return self.kiwoom.check_investor_readiness(target_date)
+
     def status(self) -> dict[str, Any]:
         return self.kiwoom.status()
 
@@ -539,6 +884,25 @@ def _first(row: dict[str, Any], keys: list[str]) -> Any:
     return None
 
 
+def _number_from_keys(row: dict[str, Any], keys: list[str]) -> float | None:
+    """Parse the first usable numeric field without turning missing data into zero."""
+    for key in keys:
+        if key not in row:
+            continue
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        number = _to_number(value)
+        if number is not None:
+            return number
+    return None
+
+
+def _latest_on_or_before(rows: list[dict[str, Any]], target_date: str) -> dict[str, Any] | None:
+    eligible = [row for row in rows if row.get("date") and row["date"] <= target_date]
+    return eligible[-1] if eligible else None
+
+
 def _to_number(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -546,9 +910,10 @@ def _to_number(value: Any) -> float | None:
     if cleaned.startswith("--"):
         cleaned = cleaned[1:]
     try:
-        return float(cleaned)
+        number = float(cleaned)
     except ValueError:
         return None
+    return number if math.isfinite(number) else None
 
 
 def _to_abs_number(value: Any) -> float | None:
@@ -577,6 +942,59 @@ def _format_date(value: Any) -> str | None:
     if not digits or len(digits) < 8:
         return None
     return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+
+
+def _ratio(value: float, denominator: int) -> float:
+    if not denominator:
+        return 0.0
+    return round(value / denominator * 100, 6)
+
+
+def _market_name(row: dict[str, Any], fallback: str) -> str:
+    market_code = str(_first(row, ["marketCode", "market_code", "mrkt_cd"]) or "").strip()
+    by_code = {
+        "0": "KOSPI",
+        "001": "KOSPI",
+        "10": "KOSDAQ",
+        "101": "KOSDAQ",
+    }
+    if market_code in by_code:
+        return by_code[market_code]
+    raw = str(_first(row, ["marketName", "mrkt_nm", "market"]) or "").strip()
+    normalized = raw.upper()
+    if "KOSPI" in normalized or "코스피" in raw:
+        return "KOSPI"
+    if "KOSDAQ" in normalized or "코스닥" in raw:
+        return "KOSDAQ"
+    return raw or fallback
+
+
+def _security_type(row: dict[str, Any], name: Any) -> str:
+    etf_flag = str(_first(row, ["etf_yn", "etfYn", "is_etf"]) or "").strip().upper()
+    if etf_flag in {"Y", "YES", "TRUE", "1", "ETF"}:
+        return "ETF"
+    etn_flag = str(_first(row, ["etn_yn", "etnYn", "is_etn"]) or "").strip().upper()
+    if etn_flag in {"Y", "YES", "TRUE", "1", "ETN"}:
+        return "ETN"
+    values = [
+        str(_first(row, ["security_type", "stk_kind", "secu_tp", "etf_yn", "etfYn", "asset_type"]) or ""),
+        str(_first(row, ["marketName", "mrkt_nm", "market"]) or ""),
+        str(name or ""),
+    ]
+    joined = " ".join(values).upper()
+    if "ETN" in joined:
+        return "ETN"
+    if "ELW" in joined:
+        return "ELW"
+    if "ETF" in joined:
+        return "ETF"
+    if any(token in joined for token in ["우선", "PREFERRED"]):
+        return "PREFERRED"
+    if "스팩" in joined or "SPAC" in joined:
+        return "SPAC"
+    if "리츠" in joined or "REIT" in joined:
+        return "REIT"
+    return "STOCK"
 
 
 def _parse_expiry(value: Any) -> datetime | None:
