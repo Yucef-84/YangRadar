@@ -195,14 +195,13 @@ button:disabled { opacity: 0.55; cursor: wait; }
   background: white;
 }
 
-.ranking-gap-control {
-  min-width: 175px !important;
-}
-
-.ranking-gap-control input[type="range"] {
-  width: 170px;
-  height: 20px;
-  accent-color: #315f99;
+.ranking-collect-date input {
+  height: 28px;
+  min-width: 135px;
+  padding: 0 7px;
+  border: 1px solid #9aa9b9;
+  background: white;
+  color: #1c2530;
 }
 
 .ranking-loading {
@@ -214,11 +213,14 @@ button:disabled { opacity: 0.55; cursor: wait; }
 .ranking-table-wrap {
   min-height: 0;
   flex: 1;
+  max-width: 100%;
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .ranking-table {
-  min-width: 1120px;
+  min-width: 0;
+  table-layout: fixed;
 }
 
 .ranking-table thead th {
@@ -229,13 +231,119 @@ button:disabled { opacity: 0.55; cursor: wait; }
 
 .ranking-table td,
 .ranking-table th {
-  height: 29px;
-  padding: 4px var(--ranking-cell-gap, 6px);
+  height: var(--ranking-row-height, 30px);
+  padding: 4px 6px;
+}
+
+.ranking-table th {
+  position: relative;
+  overflow: visible;
+}
+
+.sortable-heading {
+  width: 100%;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  color: #32465a;
+  font-weight: 700;
+  overflow: hidden;
+}
+
+.sortable-heading:hover,
+.sortable-heading:focus-visible {
+  color: #12395f;
+  background: #dce8f4;
+  outline: none;
+}
+
+.sortable-heading span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sortable-heading small {
+  flex: none;
+  color: #7a8794;
+  font-size: 10px;
+}
+
+.column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 3;
+  width: 9px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.column-resize-handle:hover,
+.column-resize-handle:focus-visible {
+  background: rgba(49, 95, 153, 0.35);
+  outline: none;
 }
 
 .ranking-table .rank-number {
+  position: relative;
+  overflow: visible;
   color: #315f99;
   font-weight: 800;
+}
+
+.row-resize-handle {
+  position: absolute;
+  right: 2px;
+  bottom: -3px;
+  z-index: 3;
+  width: 34px;
+  height: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  cursor: row-resize;
+}
+
+.row-resize-handle::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 2px;
+  height: 2px;
+  background: #6f879f;
+}
+
+.ranking-table tr:hover .row-resize-handle,
+.row-resize-handle:focus-visible {
+  opacity: 1;
+}
+
+.ranking-table tr[style] td {
+  height: var(--ranking-row-height, 30px);
+}
+
+.ranking-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 16px;
+  padding: 6px 9px;
+  color: #526170;
+  font-size: 11px;
+}
+
+.ranking-note strong {
+  color: #315f99;
 }
 
 .ranking-name {
@@ -474,8 +582,10 @@ p { margin: 2px 0 0; color: #526170; }
 
 .trading-chart-wrap {
   min-height: 0;
+  min-width: 0;
   position: relative;
   background: #f6f8fa;
+  overflow: hidden;
 }
 
 .trading-chart {
@@ -893,4 +1003,43 @@ td:first-child, th:first-child { text-align: center; }
   .resize-bar { display: none; }
   .right-pane { margin-top: 6px; }
   .chart-panel { height: 420px; }
+
+  .ranking-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ranking-job {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .ranking-job span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 680px) {
+  .ranking-filters {
+    align-items: stretch;
+  }
+
+  .ranking-filters label,
+  .ranking-filters select,
+  .ranking-collect-date input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .ranking-job {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ranking-job button {
+    width: 100%;
+  }
 }

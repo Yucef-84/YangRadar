@@ -49,6 +49,69 @@ const chartTimeframes: Array<{ value: ChartTimeframe; label: string; lookback: n
   { value: "monthly", label: "월봉", lookback: 240 },
 ];
 
+type RankingSortKey =
+  | "rank"
+  | "previous_rank"
+  | "name"
+  | "market"
+  | "close"
+  | "market_cap"
+  | "foreign_net_qty"
+  | "institution_net_qty"
+  | "combined_change_ratio"
+  | "score"
+  | "foreign_holding_ratio";
+type SortDirection = "asc" | "desc";
+type RankingColumnKey = RankingSortKey;
+
+const rankingColumns: Array<{ key: RankingColumnKey; label: string; defaultWidth: number; minWidth: number; maxWidth: number }> = [
+  { key: "rank", label: "순위", defaultWidth: 58, minWidth: 48, maxWidth: 90 },
+  { key: "previous_rank", label: "전일", defaultWidth: 64, minWidth: 52, maxWidth: 110 },
+  { key: "name", label: "종목", defaultWidth: 250, minWidth: 150, maxWidth: 430 },
+  { key: "market", label: "시장", defaultWidth: 92, minWidth: 72, maxWidth: 150 },
+  { key: "close", label: "종가(원)", defaultWidth: 112, minWidth: 90, maxWidth: 180 },
+  { key: "market_cap", label: "시가총액", defaultWidth: 132, minWidth: 100, maxWidth: 220 },
+  { key: "foreign_net_qty", label: "외국인 수량(주)", defaultWidth: 138, minWidth: 105, maxWidth: 230 },
+  { key: "institution_net_qty", label: "기관 수량(주)", defaultWidth: 138, minWidth: 105, maxWidth: 230 },
+  { key: "combined_change_ratio", label: "합산 변동률", defaultWidth: 116, minWidth: 92, maxWidth: 190 },
+  { key: "score", label: "변동률", defaultWidth: 124, minWidth: 96, maxWidth: 200 },
+  { key: "foreign_holding_ratio", label: "외국인 실제 보유율", defaultWidth: 150, minWidth: 120, maxWidth: 220 },
+];
+
+const defaultRankingColumnWidths = Object.fromEntries(
+  rankingColumns.map((column) => [column.key, column.defaultWidth]),
+) as Record<RankingColumnKey, number>;
+
+const rankingColumnStorageKey = "yangradar-ranking-column-widths";
+const rankingRowStorageKey = "yangradar-ranking-row-heights";
+
+function readRankingColumnWidths() {
+  if (typeof window === "undefined") return defaultRankingColumnWidths;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(rankingColumnStorageKey) ?? "null") as Record<string, unknown> | null;
+    if (!saved) return defaultRankingColumnWidths;
+    return rankingColumns.reduce((result, column) => ({
+      ...result,
+      [column.key]: clamp(Number(saved[column.key]) || column.defaultWidth, column.minWidth, column.maxWidth),
+    }), {} as Record<RankingColumnKey, number>);
+  } catch {
+    return defaultRankingColumnWidths;
+  }
+}
+
+function readRankingRowHeights() {
+  if (typeof window === "undefined") return {};
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(rankingRowStorageKey) ?? "{}") as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(saved).flatMap(([code, value]) => {
+      const height = Number(value);
+      return Number.isFinite(height) ? [[code, clamp(height, 24, 90)]] : [];
+    }));
+  } catch {
+    return {};
+  }
+}
+
 function App() {
   const [query, setQuery] = useState("삼성전자");
   const [results, setResults] = useState<Stock[]>([]);
@@ -185,7 +248,10 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const [market, setMarket] = useState<RankingMarket>("ALL");
   const [assetType, setAssetType] = useState<RankingAssetType>("ALL");
   const [date, setDate] = useState("");
-  const [tableGap, setTableGap] = useState(6);
+  const [collectionDate, setCollectionDate] = useState("");
+  const [sortState, setSortState] = useState<{ key: RankingSortKey; direction: SortDirection }>({ key: "rank", direction: "asc" });
+  const [columnWidths, setColumnWidths] = useState<Record<RankingColumnKey, number>>(readRankingColumnWidths);
+  const [rowHeights, setRowHeights] = useState<Record<string, number>>(readRankingRowHeights);
   const [response, setResponse] = useState<Awaited<ReturnType<typeof getInvestorRanking>> | null>(null);
   const [jobStatus, setJobStatus] = useState<InvestorRankingStatus | null>(null);
   const [loading, setLoading] = useState(false);
@@ -233,11 +299,27 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
     return () => window.clearInterval(timer);
   }, [jobStatus?.job.status]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(rankingColumnStorageKey, JSON.stringify(columnWidths));
+    } catch {
+      // Local storage can be disabled in a private browser context.
+    }
+  }, [columnWidths]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(rankingRowStorageKey, JSON.stringify(rowHeights));
+    } catch {
+      // Local storage can be disabled in a private browser context.
+    }
+  }, [rowHeights]);
+
   async function handleRefresh() {
     setRefreshing(true);
     setError("");
     try {
-      await refreshInvestorRanking(date || undefined);
+      await refreshInvestorRanking(collectionDate || undefined);
       await loadStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "전체 수급 갱신을 시작하지 못했습니다.");
@@ -249,6 +331,11 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const job = jobStatus?.job;
   const items = response?.items ?? [];
   const dataQuality = response?.data_quality;
+  const availableDates = response?.dates ?? jobStatus?.dates ?? [];
+  const selectedDate = (response?.date ?? date) || availableDates[0];
+  const previousDate = selectedDate ? availableDates.find((candidate) => candidate < selectedDate) : undefined;
+  const sortedItems = useMemo(() => sortRankingItems(items, sortState), [items, sortState]);
+  const rankingTableWidth = rankingColumns.reduce((sum, column) => sum + columnWidths[column.key], 0);
   const statusMessage = job?.status === "running"
     ? `${job.message ?? "수집 중"} · ${job.completed.toLocaleString("ko-KR")}/${job.total.toLocaleString("ko-KR")} · 성공 ${job.saved.toLocaleString("ko-KR")} · 실패 ${job.failed.toLocaleString("ko-KR")}`
     : job?.message ?? dataQuality?.message ?? "전체 종목 일별 수급 데이터가 없습니다.";
@@ -292,33 +379,54 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
           <option value="STOCK">주식만</option>
           <option value="ETF">ETF만</option>
         </select></label>
-        <label className="ranking-gap-control"><span>표 간격 · {tableGap}px</span><input type="range" min="3" max="14" step="1" value={tableGap} onChange={(event) => setTableGap(Number(event.target.value))} /></label>
+        <label className="ranking-collect-date"><span>수집 요청일 · 비우면 오늘</span><input type="date" value={collectionDate} onChange={(event) => setCollectionDate(event.target.value)} /></label>
       </div>
+
+      {availableDates.length > 0 && (
+        <div className="ranking-note panel">
+          <span>현재 기준일: <strong>{selectedDate ?? "-"}</strong></span>
+          {previousDate
+            ? <span>전일 비교 기준: <strong>{previousDate}</strong></span>
+            : <span>이전 기준일 데이터가 없어 전일 순위는 `신규`로 표시됩니다. 수집 요청일을 바꿔 과거 거래일을 추가할 수 있습니다.</span>}
+          <span>열 경계와 각 행 하단의 손잡이를 마우스로 드래그해 표를 조절할 수 있습니다.</span>
+        </div>
+      )}
 
       {error && <div className="error">{error}</div>}
       {loading && <div className="ranking-loading panel">순위를 불러오는 중입니다...</div>}
       {!loading && items.length === 0 && <EmptyPanel title="수급 순위" message={dataQuality?.message ?? "먼저 전체 수급 갱신을 실행하세요."} />}
       {!loading && items.length > 0 && (
         <div className="ranking-table-wrap panel">
-          <table className="ranking-table" style={{ "--ranking-cell-gap": `${tableGap}px` } as React.CSSProperties}>
+          <table className="ranking-table" style={{ width: `${rankingTableWidth}px` }}>
+            <colgroup>
+              {rankingColumns.map((column) => <col key={column.key} style={{ width: `${columnWidths[column.key]}px` }} />)}
+            </colgroup>
             <thead>
               <tr>
-                <th>순위</th>
-                <th>전일</th>
-                <th>종목</th>
-                <th>시장</th>
-                <th>종가</th>
-                <th>시가총액</th>
-                <th>외국인 수량</th>
-                <th>기관 수량</th>
-                <th>합산 변동률</th>
-                <th>{metricLabel(metric)} 변동률</th>
-                <th>외국인 실제 보유율</th>
+                {rankingColumns.map((column) => (
+                  <SortableHeader
+                    key={column.key}
+                    column={column}
+                    label={column.key === "score" ? `${metricLabel(metric)} 변동률` : column.label}
+                    sortState={sortState}
+                    onSort={(key) => setSortState((current) => current.key === key
+                      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+                      : { key, direction: "asc" })}
+                    onResizeStart={(event) => startColumnResize(column.key, event, columnWidths, setColumnWidths)}
+                  />
+                ))}
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => (
-                <InvestorRankingRow key={item.code} item={item} metric={metric} onSelect={onSelectStock} />
+              {sortedItems.map((item) => (
+                <InvestorRankingRow
+                  key={item.code}
+                  item={item}
+                  metric={metric}
+                  rowHeight={rowHeights[item.code] ?? 30}
+                  onSelect={onSelectStock}
+                  onResizeStart={(event) => startRowResize(item.code, event, rowHeights, setRowHeights)}
+                />
               ))}
             </tbody>
           </table>
@@ -328,13 +436,67 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   );
 }
 
-function InvestorRankingRow({ item, metric, onSelect }: { item: InvestorRankingItem; metric: RankingMetric; onSelect: (code: string) => void }) {
+function SortableHeader({
+  column,
+  label,
+  sortState,
+  onSort,
+  onResizeStart,
+}: {
+  column: { key: RankingColumnKey; label: string; defaultWidth: number; minWidth: number; maxWidth: number };
+  label: string;
+  sortState: { key: RankingSortKey; direction: SortDirection };
+  onSort: (key: RankingSortKey) => void;
+  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+}) {
+  const active = sortState.key === column.key;
+  return (
+    <th aria-sort={active ? sortState.direction === "asc" ? "ascending" : "descending" : "none"}>
+      <button
+        type="button"
+        className="sortable-heading"
+        onClick={() => onSort(column.key)}
+        title={`${label} 기준 정렬`}
+      >
+        <span>{label}</span>
+        <small aria-hidden="true">{active ? (sortState.direction === "asc" ? "▲" : "▼") : "↕"}</small>
+      </button>
+      <button
+        type="button"
+        className="column-resize-handle"
+        aria-label={`${label} 열 너비 조절`}
+        onPointerDown={onResizeStart}
+        onClick={(event) => event.stopPropagation()}
+      />
+    </th>
+  );
+}
+
+function InvestorRankingRow({
+  item,
+  metric,
+  rowHeight,
+  onSelect,
+  onResizeStart,
+}: {
+  item: InvestorRankingItem;
+  metric: RankingMetric;
+  rowHeight: number;
+  onSelect: (code: string) => void;
+  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+}) {
   const score = metricValue(item, metric);
   const rankChange = item.rank_change;
   return (
-    <tr>
-      <td className="rank-number">{item.rank}</td>
-      <td className={rankChange == null ? "rank-new" : rankChange > 0 ? "up" : rankChange < 0 ? "down" : ""}>
+    <tr style={{ "--ranking-row-height": `${rowHeight}px` } as React.CSSProperties}>
+      <td className="rank-number">
+        <span>{item.rank}</span>
+        <button type="button" className="row-resize-handle" aria-label={`${item.name} 행 높이 조절`} onPointerDown={onResizeStart} />
+      </td>
+      <td
+        className={rankChange == null ? "rank-new" : rankChange > 0 ? "up" : rankChange < 0 ? "down" : ""}
+        title={rankChange == null ? "이전 기준일에 같은 종목의 순위가 없어 비교할 수 없습니다." : undefined}
+      >
         {rankChange == null ? "신규" : rankChange === 0 ? "-" : `${rankChange > 0 ? "▲" : "▼"}${Math.abs(rankChange)}`}
       </td>
       <td className="ranking-name"><button type="button" onClick={() => onSelect(item.code)}>{item.name}<small>{item.code}</small></button></td>
@@ -348,6 +510,65 @@ function InvestorRankingRow({ item, metric, onSelect }: { item: InvestorRankingI
       <td>{ratio(item.foreign_holding_ratio)}</td>
     </tr>
   );
+}
+
+function startColumnResize(
+  key: RankingColumnKey,
+  event: React.PointerEvent<HTMLButtonElement>,
+  widths: Record<RankingColumnKey, number>,
+  setWidths: React.Dispatch<React.SetStateAction<Record<RankingColumnKey, number>>>,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  const column = rankingColumns.find((item) => item.key === key);
+  if (!column) return;
+  const startX = event.clientX;
+  const startWidth = widths[key];
+  const onMove = (moveEvent: PointerEvent) => {
+    const nextWidth = clamp(startWidth + moveEvent.clientX - startX, column.minWidth, column.maxWidth);
+    setWidths((current) => ({ ...current, [key]: nextWidth }));
+  };
+  listenForDrag(onMove);
+}
+
+function startRowResize(
+  code: string,
+  event: React.PointerEvent<HTMLButtonElement>,
+  heights: Record<string, number>,
+  setHeights: React.Dispatch<React.SetStateAction<Record<string, number>>>,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  const startY = event.clientY;
+  const startHeight = heights[code] ?? 30;
+  const onMove = (moveEvent: PointerEvent) => {
+    setHeights((current) => ({ ...current, [code]: clamp(startHeight + moveEvent.clientY - startY, 24, 90) }));
+  };
+  listenForDrag(onMove);
+}
+
+function sortRankingItems(
+  items: InvestorRankingItem[],
+  sortState: { key: RankingSortKey; direction: SortDirection },
+) {
+  const multiplier = sortState.direction === "asc" ? 1 : -1;
+  return [...items].sort((left, right) => {
+    const leftValue = rankingSortValue(left, sortState.key);
+    const rightValue = rankingSortValue(right, sortState.key);
+    if (leftValue == null && rightValue == null) return left.rank - right.rank;
+    if (leftValue == null) return 1;
+    if (rightValue == null) return -1;
+    const comparison = typeof leftValue === "string" && typeof rightValue === "string"
+      ? leftValue.localeCompare(rightValue, "ko")
+      : Number(leftValue) - Number(rightValue);
+    return comparison === 0 ? left.rank - right.rank : comparison * multiplier;
+  });
+}
+
+function rankingSortValue(item: InvestorRankingItem, key: RankingSortKey): number | string | null {
+  if (key === "name" || key === "market") return item[key];
+  if (key === "score") return item.score;
+  return item[key];
 }
 
 function metricLabel(metric: RankingMetric) {
@@ -693,6 +914,7 @@ function TradingChart({ dashboard }: { dashboard: Dashboard }) {
       },
       rightPriceScale: {
         borderColor: "#a9b7c6",
+        minimumWidth: 96,
         scaleMargins: { top: 0.08, bottom: 0.28 },
       },
       timeScale: {
