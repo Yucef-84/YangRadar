@@ -368,6 +368,34 @@ button:disabled { opacity: 0.55; cursor: wait; }
   z-index: 2;
 }
 
+.ranking-table tbody .ranking-col-rank,
+.ranking-table tbody .ranking-col-previous_rank,
+.ranking-table tbody .ranking-col-name {
+  position: sticky;
+  z-index: 1;
+  background: #f6f8fa;
+}
+
+.ranking-table thead th.ranking-col-rank,
+.ranking-table thead th.ranking-col-previous_rank,
+.ranking-table thead th.ranking-col-name {
+  z-index: 4;
+  background: #edf1f5;
+}
+
+.ranking-table .ranking-col-rank {
+  left: 0;
+}
+
+.ranking-table .ranking-col-previous_rank {
+  left: var(--ranking-rank-width);
+}
+
+.ranking-table .ranking-col-name {
+  left: calc(var(--ranking-rank-width) + var(--ranking-previous-width));
+  box-shadow: 2px 0 0 #9aa9b9;
+}
+
 .ranking-table td,
 .ranking-table th {
   height: var(--ranking-row-height, 30px);
@@ -1271,5 +1299,23 @@ td:first-child, th:first-child { text-align: center; }
   .ranking-job-actions button {
     flex: 1 1 180px;
     width: 100%;
+  }
+
+  .ranking-table tbody .ranking-col-previous_rank {
+    position: static;
+    left: auto;
+    z-index: auto;
+    background: inherit;
+  }
+
+  .ranking-table thead th.ranking-col-previous_rank {
+    position: sticky;
+    top: 0;
+    left: auto;
+    z-index: 4;
+  }
+
+  .ranking-table .ranking-col-name {
+    left: var(--ranking-rank-width);
   }
 }

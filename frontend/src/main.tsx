@@ -514,6 +514,11 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const previousDate = selectedDate ? availableDates.find((candidate) => candidate < selectedDate) : undefined;
   const sortedItems = useMemo(() => sortRankingItems(items, sortState), [items, sortState]);
   const rankingTableWidth = rankingColumns.reduce((sum, column) => sum + columnWidths[column.key], 0);
+  const rankingTableStyle = {
+    width: `${rankingTableWidth}px`,
+    "--ranking-rank-width": `${columnWidths.rank}px`,
+    "--ranking-previous-width": `${columnWidths.previous_rank}px`,
+  } as React.CSSProperties;
   const autoScheduler = jobStatus?.auto_scheduler;
   const statusMessage = rankingJobMessage(job, dataQuality?.message ?? "전체 종목 일별 수급 데이터가 없습니다.");
   const retryTargetDate = job?.target_date;
@@ -605,7 +610,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
           {previousDate
             ? <span>전일 비교 기준: <strong>{previousDate}</strong></span>
             : <span>이전 기준일 데이터가 없어 전일 순위는 `신규`로 표시됩니다. 수동 데이터 수집에서 요청일을 지정해 과거 거래일을 추가할 수 있습니다.</span>}
-          <span>열 경계와 각 행 하단의 손잡이를 마우스로 드래그해 표를 조절할 수 있습니다.</span>
+          <span>가로 스크롤 중에도 순위와 종목 열은 고정됩니다. 열 경계와 각 행 하단 손잡이를 드래그해 표 크기를 조절할 수 있습니다.</span>
         </div>
       )}
 
@@ -614,7 +619,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
       {!loading && items.length === 0 && <EmptyPanel title="수급 순위" message={dataQuality?.message ?? "먼저 전체 수급 갱신을 실행하세요."} />}
       {!loading && items.length > 0 && (
         <div className="ranking-table-wrap panel">
-          <table className="ranking-table" style={{ width: `${rankingTableWidth}px` }}>
+          <table className="ranking-table" style={rankingTableStyle}>
             <colgroup>
               {rankingColumns.map((column) => <col key={column.key} style={{ width: `${columnWidths[column.key]}px` }} />)}
             </colgroup>
@@ -668,7 +673,7 @@ function SortableHeader({
 }) {
   const active = sortState.key === column.key;
   return (
-    <th aria-sort={active ? sortState.direction === "asc" ? "ascending" : "descending" : "none"}>
+    <th className={`ranking-col-${column.key}`} aria-sort={active ? sortState.direction === "asc" ? "ascending" : "descending" : "none"}>
       <button
         type="button"
         className="sortable-heading"
@@ -706,25 +711,25 @@ function InvestorRankingRow({
   const rankChange = item.rank_change;
   return (
     <tr style={{ "--ranking-row-height": `${rowHeight}px` } as React.CSSProperties}>
-      <td className="rank-number">
+      <td className="ranking-col-rank rank-number">
         <span>{item.rank}</span>
         <button type="button" className="row-resize-handle" aria-label={`${item.name} 행 높이 조절`} onPointerDown={onResizeStart} />
       </td>
       <td
-        className={rankChange == null ? "rank-new" : rankChange > 0 ? "up" : rankChange < 0 ? "down" : ""}
+        className={`ranking-col-previous_rank ${rankChange == null ? "rank-new" : rankChange > 0 ? "up" : rankChange < 0 ? "down" : ""}`}
         title={rankChange == null ? "이전 기준일에 같은 종목의 순위가 없어 비교할 수 없습니다." : undefined}
       >
         {rankChange == null ? "신규" : rankChange === 0 ? "-" : `${rankChange > 0 ? "▲" : "▼"}${Math.abs(rankChange)}`}
       </td>
-      <td className="ranking-name"><button type="button" onClick={() => onSelect(item.code)}>{item.name}<small>{item.code}</small></button></td>
-      <td>{item.market}{item.security_type === "ETF" && <em className="asset-badge">ETF</em>}</td>
-      <td>{price(item.close)}</td>
-      <td>{moneyWon(item.market_cap)}</td>
-      <td className={numberClass(item.foreign_net_qty)}>{shares(item.foreign_net_qty)}</td>
-      <td className={numberClass(item.institution_net_qty)}>{shares(item.institution_net_qty)}</td>
-      <td className={numberClass(item.combined_change_ratio)}>{ratio(item.combined_change_ratio)}</td>
-      <td className={numberClass(score)}>{ratio(score)}</td>
-      <td>{ratio(item.foreign_holding_ratio)}</td>
+      <td className="ranking-col-name ranking-name"><button type="button" onClick={() => onSelect(item.code)}>{item.name}<small>{item.code}</small></button></td>
+      <td className="ranking-col-market">{item.market}{item.security_type === "ETF" && <em className="asset-badge">ETF</em>}</td>
+      <td className="ranking-col-close">{price(item.close)}</td>
+      <td className="ranking-col-market_cap">{moneyWon(item.market_cap)}</td>
+      <td className={`ranking-col-foreign_net_qty ${numberClass(item.foreign_net_qty)}`}>{shares(item.foreign_net_qty)}</td>
+      <td className={`ranking-col-institution_net_qty ${numberClass(item.institution_net_qty)}`}>{shares(item.institution_net_qty)}</td>
+      <td className={`ranking-col-combined_change_ratio ${numberClass(item.combined_change_ratio)}`}>{ratio(item.combined_change_ratio)}</td>
+      <td className={`ranking-col-score ${numberClass(score)}`}>{ratio(score)}</td>
+      <td className="ranking-col-foreign_holding_ratio">{ratio(item.foreign_holding_ratio)}</td>
     </tr>
   );
 }
