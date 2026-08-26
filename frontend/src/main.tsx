@@ -26,6 +26,7 @@ import {
   testKiwoomAuth,
 } from "./api";
 import type {
+  AutoSchedulerStatus,
   ChartTimeframe,
   Dashboard,
   DataQuality,
@@ -90,6 +91,64 @@ type AppView = "dashboard" | "rankings";
 function readViewFromLocation(): AppView {
   if (typeof window === "undefined") return "dashboard";
   return new URLSearchParams(window.location.search).get("view") === "rankings" ? "rankings" : "dashboard";
+}
+
+function kstDateKey(value: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function formatKstTimestamp(value: string | null | undefined, targetDate: string | null | undefined, forceDate = false): string {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const time = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(parsed);
+  const includeDate = forceDate || !targetDate || kstDateKey(parsed) !== targetDate;
+  if (!includeDate) return `${time} KST`;
+  const date = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    month: "numeric",
+    day: "numeric",
+  }).format(parsed);
+  return `${date} ${time} KST`;
+}
+
+function formatAutoSchedulerMessage(autoScheduler: AutoSchedulerStatus | null | undefined): string {
+  if (!autoScheduler) return "자동 수집 상태 확인 중";
+  const nextCheck = formatKstTimestamp(autoScheduler.next_check_at, autoScheduler.target_date);
+  const sample = typeof autoScheduler.ready_count === "number" && typeof autoScheduler.sample_count === "number"
+    ? ` · 표본 ${autoScheduler.ready_count}/${autoScheduler.sample_count}`
+    : "";
+  switch (autoScheduler.state) {
+    case "waiting_time":
+      return `자동 수집 대기 · ${nextCheck || "15:40 KST"}부터 당일 데이터 확인`;
+    case "waiting_data":
+      return `당일 수급 데이터 반영 대기${sample}${nextCheck ? ` · 다음 확인 ${nextCheck}` : ""}`;
+    case "running":
+      return "자동 수집 진행 중";
+    case "completed":
+      return `오늘 자동 수집 완료${nextCheck ? ` · 다음 확인 ${nextCheck}` : ""}`;
+    case "error":
+      return `자동 확인 오류${nextCheck ? ` · 다음 확인 ${nextCheck}` : ""}`;
+    case "disabled":
+      return "자동 수집 비활성 · 키움 API 설정 필요";
+    case "weekend":
+      return `주말 자동 수집 없음${nextCheck ? ` · 다음 확인 ${formatKstTimestamp(autoScheduler.next_check_at, autoScheduler.target_date, true)}` : ""}`;
+    case "idle":
+    default:
+      return "자동 수집 상태 확인 중";
+  }
 }
 
 function readRankingColumnWidths() {
@@ -337,13 +396,14 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   }, [date, metric, direction, market, assetType]);
 
   useEffect(() => {
-    if (jobStatus?.job.status !== "running") return;
+    const previousJobStatus = jobStatus?.job.status;
+    const intervalMs = previousJobStatus === "running" ? 2000 : 30000;
     const timer = window.setInterval(() => {
       void getInvestorRankingStatus().then((next) => {
         setJobStatus(next);
-        if (next.job.status !== "running") void loadRanking();
+        if (previousJobStatus === "running" && next.job.status !== "running") void loadRanking();
       }).catch(() => undefined);
-    }, 2000);
+    }, intervalMs);
     return () => window.clearInterval(timer);
   }, [jobStatus?.job.status]);
 
@@ -384,6 +444,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const previousDate = selectedDate ? availableDates.find((candidate) => candidate < selectedDate) : undefined;
   const sortedItems = useMemo(() => sortRankingItems(items, sortState), [items, sortState]);
   const rankingTableWidth = rankingColumns.reduce((sum, column) => sum + columnWidths[column.key], 0);
+  const autoScheduler = jobStatus?.auto_scheduler;
   const statusMessage = job?.status === "running"
     ? `${job.message ?? "수집 중"} · ${job.completed.toLocaleString("ko-KR")}/${job.total.toLocaleString("ko-KR")} · 성공 ${job.saved.toLocaleString("ko-KR")} · 실패 ${job.failed.toLocaleString("ko-KR")}`
     : job?.message ?? dataQuality?.message ?? "전체 종목 일별 수급 데이터가 없습니다.";
@@ -391,9 +452,12 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   return (
     <section className="ranking-view">
       <div className="ranking-heading panel">
-        <div>
+        <div className="ranking-heading-copy">
           <h1>매일 변동 TOP 100 · 외국인·기관 수급 순위</h1>
           <p>시가총액 환산(상장주식수 기준) 일일 보유변동률 · 전체 종목 및 ETF</p>
+          <p className={`ranking-auto-status state-${autoScheduler?.state ?? "idle"}`} role="status" aria-live="polite">
+            {formatAutoSchedulerMessage(autoScheduler)}
+          </p>
         </div>
         <div className={`ranking-job ${job?.status === "running" ? "running" : ""}`}>
           <span>{statusMessage}</span>

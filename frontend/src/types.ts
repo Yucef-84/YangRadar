@@ -205,9 +205,30 @@ export interface RankingJob {
   updated_at: string | null;
 }
 
+export type AutoSchedulerState =
+  | "idle"
+  | "waiting_time"
+  | "waiting_data"
+  | "running"
+  | "completed"
+  | "error"
+  | "disabled"
+  | "weekend";
+
+export interface AutoSchedulerStatus {
+  state: AutoSchedulerState;
+  target_date: string | null;
+  last_checked_at: string | null;
+  next_check_at: string | null;
+  ready_count: number | null;
+  sample_count: number | null;
+  message: string | null;
+}
+
 export interface InvestorRankingStatus {
   job: RankingJob;
   dates: string[];
+  auto_scheduler: AutoSchedulerStatus;
 }
 
 export interface SearchResponse {

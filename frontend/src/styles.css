@@ -145,6 +145,37 @@ button:disabled { opacity: 0.55; cursor: wait; }
   font-size: 18px;
 }
 
+.ranking-heading-copy {
+  min-width: 0;
+  flex: 1 1 360px;
+}
+
+.ranking-auto-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  color: #315f99;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ranking-auto-status.state-running,
+.ranking-auto-status.state-completed {
+  color: #0b7a45;
+  font-weight: 700;
+}
+
+.ranking-auto-status.state-error {
+  color: #8b1111;
+  font-weight: 700;
+}
+
+.ranking-auto-status.state-disabled,
+.ranking-auto-status.state-weekend {
+  color: #526170;
+}
+
 .ranking-job {
   display: flex;
   align-items: center;
