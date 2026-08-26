@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { BarChart3, RefreshCw, Search, Settings as SettingsIcon, X } from "lucide-react";
+import { BarChart3, LayoutDashboard, RefreshCw, Search, Settings as SettingsIcon, X } from "lucide-react";
 import {
   CandlestickSeries,
   ColorType,
@@ -85,6 +85,13 @@ const defaultRankingColumnWidths = Object.fromEntries(
 const rankingColumnStorageKey = "yangradar-ranking-column-widths";
 const rankingRowStorageKey = "yangradar-ranking-row-heights";
 
+type AppView = "dashboard" | "rankings";
+
+function readViewFromLocation(): AppView {
+  if (typeof window === "undefined") return "dashboard";
+  return new URLSearchParams(window.location.search).get("view") === "rankings" ? "rankings" : "dashboard";
+}
+
 function readRankingColumnWidths() {
   if (typeof window === "undefined") return defaultRankingColumnWidths;
   try {
@@ -123,7 +130,34 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [view, setView] = useState<"dashboard" | "rankings">("dashboard");
+  const [view, setView] = useState<AppView>(readViewFromLocation);
+
+  function navigateToView(nextView: AppView, options: { replace?: boolean } = {}) {
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      const currentParam = url.searchParams.get("view");
+      if (options.replace || currentParam !== nextView) {
+        url.searchParams.set("view", nextView);
+        const historyMethod = options.replace ? "replaceState" : "pushState";
+        window.history[historyMethod]({ ...(window.history.state ?? {}), view: nextView }, "", url);
+      }
+    }
+    setView(nextView);
+  }
+
+  useEffect(() => {
+    const initialView = readViewFromLocation();
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("view") !== initialView) {
+      url.searchParams.set("view", initialView);
+      window.history.replaceState({ ...(window.history.state ?? {}), view: initialView }, "", url);
+    }
+    setView(initialView);
+
+    const handlePopState = () => setView(readViewFromLocation());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   useEffect(() => {
     void loadSettings();
@@ -144,7 +178,7 @@ function App() {
       const response = await searchStocks(query);
       setResults(response.items);
       setSearchQuality(response.data_quality);
-      setView("dashboard");
+      navigateToView("dashboard");
       if (response.items[0]) setSelected(response.items[0].code);
     } catch (err) {
       setError(err instanceof Error ? err.message : "검색 중 오류가 발생했습니다.");
@@ -197,7 +231,21 @@ function App() {
           <RefreshCw size={16} />
           갱신
         </button>
-        <button className={`action ${view === "rankings" ? "active-action" : ""}`} onClick={() => setView("rankings")} title="외국인·기관 수급 순위">
+        <button
+          className={`action ${view === "dashboard" ? "active-action" : ""}`}
+          onClick={() => navigateToView("dashboard")}
+          aria-current={view === "dashboard" ? "page" : undefined}
+          title="종목 대시보드"
+        >
+          <LayoutDashboard size={16} />
+          대시보드
+        </button>
+        <button
+          className={`action ${view === "rankings" ? "active-action" : ""}`}
+          onClick={() => navigateToView("rankings")}
+          aria-current={view === "rankings" ? "page" : undefined}
+          title="외국인·기관 수급 순위"
+        >
           <BarChart3 size={16} />
           수급 순위
         </button>
@@ -224,7 +272,7 @@ function App() {
         <InvestorRankingView
           onSelectStock={(code) => {
             setSelected(code);
-            setView("dashboard");
+            navigateToView("dashboard");
           }}
         />
       )}
