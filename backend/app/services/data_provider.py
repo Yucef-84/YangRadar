@@ -15,6 +15,7 @@ from .stock_universe import LOCAL_STOCKS, local_stock
 DEFAULT_KIWOOM_REQUEST_INTERVAL = 0.275
 DEFAULT_KIWOOM_RATE_LIMIT_RETRIES = 3
 DEFAULT_KIWOOM_RATE_LIMIT_BACKOFF = (1.0, 2.0, 4.0)
+INVESTOR_READINESS_SAMPLE_CODES = ("005930", "000660", "035720")
 
 _kiwoom_rate_limit_lock = threading.Lock()
 _kiwoom_last_request_at: float | None = None
@@ -223,6 +224,81 @@ class KiwoomRestProvider:
         if failures:
             message += f" 실패 {len(failures)}개. 예: " + " / ".join(failures[:3])
         return rows, self._quality("investor_daily", status, message)
+
+    def check_investor_readiness(self, target_date: str) -> dict[str, Any]:
+        """Check whether the requested trading day's investor data is available.
+
+        This intentionally probes only a few liquid common stocks.  It must stay
+        cheap enough to run periodically while the market's end-of-day data is
+        propagating, so it does not enumerate the stock universe or request any
+        supplementary quote/holding data.
+        """
+        sample_codes = INVESTOR_READINESS_SAMPLE_CODES
+        base: dict[str, Any] = {
+            "ready": False,
+            "target_date": target_date,
+            "checked": False,
+            "ready_count": 0,
+            "sample_count": len(sample_codes),
+            "samples": [],
+        }
+        if not self.configured:
+            base["status"] = "api_not_configured"
+            return base
+
+        checked_at = datetime.now().isoformat(timespec="seconds")
+        samples: list[dict[str, Any]] = []
+        ready_count = 0
+        error_count = 0
+        for code in sample_codes:
+            sample: dict[str, Any] = {"code": code, "actual_date": None, "status": "error"}
+            try:
+                # include_values=False guarantees one ka10060 quantity request
+                # per sample and inherits the shared limiter/retry behavior in
+                # _post().  _get_investor_day may return a prior date; readiness
+                # is strict and accepts only an exact target-date row.
+                investor = self._get_investor_day(code, target_date, include_values=False)
+                actual_date = investor.get("date") if investor else None
+                sample["actual_date"] = actual_date
+                if actual_date == target_date:
+                    sample["status"] = "ready"
+                    ready_count += 1
+                elif actual_date:
+                    sample["status"] = "stale"
+                else:
+                    sample["status"] = "missing"
+            except KiwoomApiError as exc:
+                # Keep diagnostics safe for the status endpoint: expose the
+                # provider error code, never credentials or request details.
+                sample["error_code"] = exc.code
+                sample["error"] = exc.code
+                error_count += 1
+            except Exception:
+                # A single transient/malformed sample must not prevent the
+                # other probes from determining readiness.
+                sample["error_code"] = "unexpected_error"
+                sample["error"] = "unexpected_error"
+                error_count += 1
+            samples.append(sample)
+
+        if error_count == len(sample_codes):
+            status = "error"
+        elif ready_count >= 2:
+            status = "ready"
+        else:
+            status = "waiting_data"
+        base.update(
+            {
+                "ready": ready_count >= 2,
+                "checked": True,
+                "checked_at": checked_at,
+                "ready_count": ready_count,
+                "error_count": error_count,
+                "samples": samples,
+                "status": status,
+            }
+        )
+        return base
 
     def dashboard(self, code: str, lookback: int, timeframe: str = "daily") -> dict[str, Any]:
         stock = local_stock(code)
@@ -766,6 +842,9 @@ class DataProvider:
             include_values=include_values,
             include_holdings=include_holdings,
         )
+
+    def check_investor_readiness(self, target_date: str) -> dict[str, Any]:
+        return self.kiwoom.check_investor_readiness(target_date)
 
     def status(self) -> dict[str, Any]:
         return self.kiwoom.status()

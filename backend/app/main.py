@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time as datetime_time, timedelta
 import ipaddress
 import re
-import time
-from threading import Thread
+import time as time_module
+from threading import Lock, Thread
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +34,20 @@ app = FastAPI(title="YangRadar API", version="0.4.0")
 provider = DataProvider()
 ranking_service = InvestorRankingService(provider)
 _auto_scheduler_started = False
+_KST = ZoneInfo("Asia/Seoul")
+_AUTO_COLLECTION_TIME = datetime_time(15, 40)
+_AUTO_READINESS_INTERVAL = timedelta(minutes=10)
+_AUTO_SCHEDULER_TICK_SECONDS = 60
+_auto_scheduler_state_lock = Lock()
+_auto_scheduler_state: dict[str, Any] = {
+    "state": "idle",
+    "target_date": None,
+    "last_checked_at": None,
+    "next_check_at": None,
+    "ready_count": None,
+    "sample_count": None,
+    "message": None,
+}
 
 
 class KiwoomSettingsPayload(BaseModel):
@@ -79,8 +94,7 @@ def startup() -> None:
     init_db()
     stocks, quality = provider.list_stocks()
     upsert_stocks(stocks, datetime.now().isoformat(timespec="seconds"), complete=quality.get("complete") is True)
-    if _should_auto_collect_rankings():
-        ranking_service.start(datetime.now().date().isoformat())
+    _auto_scheduler_tick()
     if not _auto_scheduler_started:
         _auto_scheduler_started = True
         Thread(target=_auto_collect_loop, daemon=True, name="yangradar-ranking-scheduler").start()
@@ -196,7 +210,12 @@ def investor_ranking(
 
 @app.get("/api/rankings/investor/status")
 def investor_ranking_status() -> dict[str, Any]:
-    return {"job": get_ranking_job(), "dates": get_investor_dates(), "provider": provider.status()}
+    return {
+        "job": get_ranking_job(),
+        "dates": get_investor_dates(),
+        "provider": provider.status(),
+        "auto_scheduler": _auto_scheduler_snapshot(),
+    }
 
 
 @app.post("/api/rankings/investor/refresh")
@@ -266,22 +285,317 @@ def _normalize_optional_date(value: str | None) -> str | None:
     return normalized
 
 
-def _should_auto_collect_rankings() -> bool:
-    now = datetime.now()
-    if not provider.status().get("configured") or now.weekday() >= 5 or now.hour < 18:
+def _now_kst() -> datetime:
+    return datetime.now(_KST)
+
+
+def _as_kst(value: datetime) -> datetime:
+    """Treat naive test values as KST and normalize aware values to KST."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=_KST)
+    return value.astimezone(_KST)
+
+
+def _iso_kst(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return _as_kst(value).isoformat(timespec="seconds")
+
+
+def _today_kst(value: datetime) -> str:
+    return _as_kst(value).date().isoformat()
+
+
+def _collection_start_at(value: datetime) -> datetime:
+    current = _as_kst(value)
+    return datetime.combine(current.date(), _AUTO_COLLECTION_TIME, tzinfo=_KST)
+
+
+def _next_weekday_collection_start(value: datetime) -> datetime:
+    current = _as_kst(value)
+    candidate = current.date() + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return datetime.combine(candidate, _AUTO_COLLECTION_TIME, tzinfo=_KST)
+
+
+def _auto_scheduler_snapshot() -> dict[str, Any]:
+    with _auto_scheduler_state_lock:
+        return dict(_auto_scheduler_state)
+
+
+def _set_auto_scheduler_state(**values: Any) -> dict[str, Any]:
+    with _auto_scheduler_state_lock:
+        _auto_scheduler_state.update(values)
+        return dict(_auto_scheduler_state)
+
+
+def _reset_auto_scheduler_state() -> None:
+    """Reset process-local scheduler state for deterministic tests."""
+    _set_auto_scheduler_state(
+        state="idle",
+        target_date=None,
+        last_checked_at=None,
+        next_check_at=None,
+        ready_count=None,
+        sample_count=None,
+        message=None,
+    )
+
+
+def _next_check_datetime(snapshot: dict[str, Any]) -> datetime | None:
+    value = snapshot.get("next_check_at")
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return _as_kst(value)
+    try:
+        return _as_kst(datetime.fromisoformat(str(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ranking_job_snapshot() -> dict[str, Any]:
+    try:
+        snapshot = get_ranking_job()
+        return snapshot if isinstance(snapshot, dict) else {}
+    except Exception:
+        return {}
+
+
+def _ranking_job_is_running(target_date: str, snapshot: dict[str, Any] | None = None) -> bool:
+    job = snapshot if snapshot is not None else _ranking_job_snapshot()
+    return str(job.get("status") or "").lower() == "running"
+
+
+def _ranking_job_has_incomplete_rows(target_date: str, snapshot: dict[str, Any]) -> bool:
+    """Identify a current-date job that can still be resumed.
+
+    InvestorRankingService may persist some rows before a process/network
+    failure.  A latest-date row therefore does not by itself mean that the
+    whole universe is complete.
+    """
+    if str(snapshot.get("target_date") or "") != target_date:
         return False
-    return get_latest_investor_date() != now.date().isoformat()
+    status = str(snapshot.get("status") or "").lower()
+    if status in {"failed", "error"}:
+        return True
+    if status != "completed":
+        return False
+    try:
+        failed = int(snapshot.get("failed") or 0)
+    except (TypeError, ValueError):
+        failed = 0
+    try:
+        total = int(snapshot.get("total") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    try:
+        saved = int(snapshot.get("saved") or 0)
+    except (TypeError, ValueError):
+        saved = 0
+    return failed > 0 or (total > 0 and saved < total)
+
+
+def _should_auto_collect_rankings(now: datetime | None = None) -> bool:
+    """Return whether today's full collection is eligible to be considered.
+
+    The readiness probe and its ten-minute schedule are handled by
+    ``_auto_scheduler_tick``; this compatibility helper only performs the
+    inexpensive KST/date/job gates.
+    """
+    current = _as_kst(now or _now_kst())
+    target_date = _today_kst(current)
+    if current.weekday() >= 5 or current < _collection_start_at(current):
+        return False
+    if not provider.status().get("configured"):
+        return False
+    if get_latest_investor_date() == target_date:
+        return False
+    if _ranking_job_is_running(target_date):
+        return False
+    return True
+
+
+def _auto_scheduler_tick(now: datetime | None = None) -> dict[str, Any]:
+    """Advance the in-process KST readiness/collection scheduler once."""
+    current = _as_kst(now or _now_kst())
+    target_date = _today_kst(current)
+    snapshot = _auto_scheduler_snapshot()
+
+    # A new KST date starts with a clean readiness window.  No historical
+    # backfill is attempted: only the current KST trading date is considered.
+    if snapshot.get("target_date") != target_date:
+        _set_auto_scheduler_state(
+            state="idle",
+            target_date=target_date,
+            last_checked_at=None,
+            next_check_at=None,
+            ready_count=None,
+            sample_count=None,
+            message=None,
+        )
+
+    if current.weekday() >= 5:
+        return _set_auto_scheduler_state(
+            state="weekend",
+            target_date=target_date,
+            next_check_at=_iso_kst(_next_weekday_collection_start(current)),
+            message="주말에는 수급 준비상태를 확인하지 않습니다.",
+        )
+
+    collection_start = _collection_start_at(current)
+    if current < collection_start:
+        return _set_auto_scheduler_state(
+            state="waiting_time",
+            target_date=target_date,
+            next_check_at=_iso_kst(collection_start),
+            message="15:40 KST 이후 장 마감 수급 준비상태를 확인합니다.",
+        )
+
+    try:
+        configured = bool(provider.status().get("configured"))
+    except Exception:
+        configured = False
+    if not configured:
+        return _set_auto_scheduler_state(
+            state="disabled",
+            target_date=target_date,
+            next_check_at=_iso_kst(current + _AUTO_READINESS_INTERVAL),
+            message="키움 REST API가 설정되지 않아 자동 수집을 대기 중입니다.",
+        )
+
+    job_snapshot = _ranking_job_snapshot()
+    if _ranking_job_is_running(target_date, job_snapshot):
+        snapshot = _auto_scheduler_snapshot()
+        scheduled_retry = _next_check_datetime(snapshot)
+        retry_at = scheduled_retry if scheduled_retry is not None and current < scheduled_retry else current + _AUTO_READINESS_INTERVAL
+        return _set_auto_scheduler_state(
+            state="running",
+            target_date=target_date,
+            next_check_at=_iso_kst(retry_at),
+            message="전체 수급 수집이 진행 중입니다.",
+        )
+
+    try:
+        latest_date = get_latest_investor_date()
+    except Exception as exc:
+        return _set_auto_scheduler_state(
+            state="error",
+            target_date=target_date,
+            last_checked_at=_iso_kst(current),
+            next_check_at=_iso_kst(current + _AUTO_READINESS_INTERVAL),
+            message=f"최근 수급 기준일 확인 실패: {type(exc).__name__}",
+        )
+    if latest_date == target_date and not _ranking_job_has_incomplete_rows(target_date, job_snapshot):
+        return _set_auto_scheduler_state(
+            state="completed",
+            target_date=target_date,
+            next_check_at=_iso_kst(_next_weekday_collection_start(current)),
+            message="오늘 수급 데이터가 이미 저장되어 있습니다.",
+        )
+
+    # Do not probe again until the scheduled readiness time.  Database/status
+    # checks above are intentionally cheap and do not call Kiwoom.
+    snapshot = _auto_scheduler_snapshot()
+    next_check = _next_check_datetime(snapshot)
+    if next_check is not None and current < next_check:
+        return snapshot
+
+    try:
+        readiness = provider.check_investor_readiness(target_date)
+    except Exception as exc:
+        return _set_auto_scheduler_state(
+            state="error",
+            target_date=target_date,
+            last_checked_at=_iso_kst(current),
+            next_check_at=_iso_kst(current + _AUTO_READINESS_INTERVAL),
+            ready_count=0,
+            sample_count=None,
+            message=f"수급 준비상태 확인 실패: {type(exc).__name__}",
+        )
+
+    ready_count = readiness.get("ready_count")
+    sample_count = readiness.get("sample_count")
+    readiness_status = str(readiness.get("status") or "").lower()
+    if readiness_status == "error":
+        return _set_auto_scheduler_state(
+            state="error",
+            target_date=target_date,
+            last_checked_at=_iso_kst(current),
+            next_check_at=_iso_kst(current + _AUTO_READINESS_INTERVAL),
+            ready_count=ready_count,
+            sample_count=sample_count,
+            message="수급 준비상태 표본 API 확인에 실패했습니다.",
+        )
+    is_ready = readiness.get("ready") is True or (
+        isinstance(ready_count, int) and ready_count >= 2
+    )
+    if not is_ready:
+        actual_target = readiness.get("target_date") or target_date
+        return _set_auto_scheduler_state(
+            state="waiting_data",
+            target_date=target_date,
+            last_checked_at=_iso_kst(current),
+            next_check_at=_iso_kst(current + _AUTO_READINESS_INTERVAL),
+            ready_count=ready_count,
+            sample_count=sample_count,
+            message=f"{actual_target} 수급 데이터가 아직 준비되지 않았습니다.",
+        )
+
+    try:
+        result = ranking_service.start(target_date)
+    except Exception as exc:
+        return _set_auto_scheduler_state(
+            state="error",
+            target_date=target_date,
+            last_checked_at=_iso_kst(current),
+            next_check_at=_iso_kst(current + _AUTO_READINESS_INTERVAL),
+            ready_count=ready_count,
+            sample_count=sample_count,
+            message=f"전체 수급 수집 시작 실패: {type(exc).__name__}",
+        )
+    # Give the worker time to publish its persisted `running` row.  Keeping a
+    # short retry window also prevents a startup tick race from calling
+    # readiness/start twice, while a failed job can be retried later.
+    retry_at = _iso_kst(current + _AUTO_READINESS_INTERVAL)
+    if result.get("started") is True:
+        return _set_auto_scheduler_state(
+            state="running",
+            target_date=target_date,
+            last_checked_at=_iso_kst(current),
+            next_check_at=retry_at,
+            ready_count=ready_count,
+            sample_count=sample_count,
+            message=result.get("message") or "전체 수급 수집을 시작했습니다.",
+        )
+    return _set_auto_scheduler_state(
+        state="running",
+        target_date=target_date,
+        last_checked_at=_iso_kst(current),
+        next_check_at=retry_at,
+        ready_count=ready_count,
+        sample_count=sample_count,
+        message=result.get("message") or "전체 수급 수집이 이미 진행 중입니다.",
+    )
 
 
 def _auto_collect_loop() -> None:
     while True:
         try:
-            if _should_auto_collect_rankings():
-                ranking_service.start(datetime.now().date().isoformat())
-        except Exception:
-            # The manual refresh endpoint remains available if the scheduler cannot run.
-            pass
-        time.sleep(60)
+            _auto_scheduler_tick()
+        except Exception as exc:
+            # Keep the manual refresh endpoint available if the scheduler
+            # encounters an unexpected process-local failure.
+            current = _now_kst()
+            _set_auto_scheduler_state(
+                state="error",
+                target_date=_today_kst(current),
+                last_checked_at=_iso_kst(current),
+                next_check_at=_iso_kst(current + _AUTO_READINESS_INTERVAL),
+                message=f"자동 수집 스케줄러 오류: {type(exc).__name__}",
+            )
+        time_module.sleep(_AUTO_SCHEDULER_TICK_SECONDS)
 
 
 def _max_lookback(timeframe: str) -> int:

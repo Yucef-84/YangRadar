@@ -60,6 +60,99 @@ class InvestorDateSelectionTests(TestCase):
         self.assertIsNone(provider._get_investor_day("005930", "2026-08-25"))
 
 
+class InvestorReadinessTests(TestCase):
+    def _response(self, date: str) -> dict:
+        return {"stk_invsr_orgn_chart": [_investor_row(date)]}
+
+    def test_two_of_three_exact_dates_are_ready(self) -> None:
+        provider = _provider({})
+        provider._post = Mock(
+            side_effect=[
+                self._response("20260825"),
+                self._response("20260825"),
+                self._response("20260824"),
+            ]
+        )
+
+        result = provider.check_investor_readiness("2026-08-25")
+
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["checked"])
+        self.assertEqual(result["ready_count"], 2)
+        self.assertEqual(result["sample_count"], 3)
+        self.assertEqual(provider._post.call_count, 3)
+        self.assertTrue(all(call.args[1] == "ka10060" for call in provider._post.call_args_list))
+        self.assertTrue(all(call.args[2]["amt_qty_tp"] == "2" for call in provider._post.call_args_list))
+
+    def test_one_sample_error_does_not_block_two_exact_dates(self) -> None:
+        provider = _provider({})
+        provider._post = Mock(
+            side_effect=[
+                KiwoomApiError("network_error", "temporary"),
+                self._response("20260825"),
+                self._response("20260825"),
+            ]
+        )
+
+        result = provider.check_investor_readiness("2026-08-25")
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["ready_count"], 2)
+        self.assertEqual(result["samples"][0]["status"], "error")
+        self.assertEqual(result["samples"][0]["error_code"], "network_error")
+        self.assertEqual(result["samples"][0]["error"], "network_error")
+
+    def test_prior_date_fallback_is_not_ready(self) -> None:
+        provider = _provider({})
+        provider._post = Mock(
+            side_effect=[
+                self._response("20260824"),
+                self._response("20260824"),
+                self._response("20260824"),
+            ]
+        )
+
+        result = provider.check_investor_readiness("2026-08-25")
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["ready_count"], 0)
+        self.assertTrue(all(sample["status"] == "stale" for sample in result["samples"]))
+        self.assertEqual(result["status"], "waiting_data")
+
+    def test_all_sample_api_errors_have_error_status(self) -> None:
+        provider = _provider({})
+        provider._post = Mock(
+            side_effect=[
+                KiwoomApiError("network_error", "temporary"),
+                KiwoomApiError("rate_limited", "temporary"),
+                KiwoomApiError("api_error", "temporary"),
+            ]
+        )
+
+        result = provider.check_investor_readiness("2026-08-25")
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_count"], 3)
+        self.assertEqual(result["ready_count"], 0)
+
+    def test_readiness_does_not_enumerate_universe_or_request_supplementary_data(self) -> None:
+        provider = _provider({})
+        provider._post = Mock(
+            side_effect=[self._response("20260825")] * len(data_provider_module.INVESTOR_READINESS_SAMPLE_CODES)
+        )
+        provider.list_stocks = Mock()  # type: ignore[method-assign]
+        provider._get_quote = Mock()  # type: ignore[method-assign]
+        provider._get_foreign_holding = Mock()  # type: ignore[method-assign]
+
+        provider.check_investor_readiness("2026-08-25")
+
+        provider.list_stocks.assert_not_called()
+        provider._get_quote.assert_not_called()
+        provider._get_foreign_holding.assert_not_called()
+        self.assertEqual(provider._post.call_count, 3)
+
+
 class ForeignHoldingDateSelectionTests(TestCase):
     def test_previous_holding_date_is_used(self) -> None:
         provider = _provider(
