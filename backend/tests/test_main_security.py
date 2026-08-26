@@ -69,6 +69,57 @@ class SettingsEndpointSecurityTests(TestCase):
     def setUp(self) -> None:
         self.client = ASGITestClient(main.app)
 
+    def test_evil_origin_health_request_is_rejected(self) -> None:
+        status, _body = self.client.request(
+            "GET",
+            "/api/health",
+            client_host="127.0.0.1",
+            headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(status, 403)
+
+    def test_evil_origin_ranking_refresh_is_rejected_before_start(self) -> None:
+        fake_service = Mock()
+        with patch.object(main, "ranking_service", fake_service):
+            status, _body = self.client.request(
+                "POST",
+                "/api/rankings/investor/refresh",
+                client_host="127.0.0.1",
+                headers={"Origin": "https://evil.example"},
+            )
+        self.assertEqual(status, 403)
+        fake_service.start.assert_not_called()
+
+    def test_originless_cross_site_dashboard_is_rejected_before_provider_call(self) -> None:
+        fake_provider = Mock()
+        with patch.object(main, "provider", fake_provider):
+            status, _body = self.client.request(
+                "GET",
+                "/api/stocks/005930/dashboard",
+                client_host="127.0.0.1",
+                headers={"Sec-Fetch-Site": "cross-site"},
+            )
+        self.assertEqual(status, 403)
+        fake_provider.build_dashboard.assert_not_called()
+
+    def test_allowed_local_origins_are_accepted(self) -> None:
+        for origin in ("http://127.0.0.1:4173", "http://localhost:4173"):
+            status, _body = self.client.request(
+                "GET",
+                "/api/health",
+                client_host="127.0.0.1",
+                headers={"Origin": origin},
+            )
+            self.assertEqual(status, 200, origin)
+
+    def test_originless_native_request_is_accepted(self) -> None:
+        status, _body = self.client.request(
+            "GET",
+            "/api/health",
+            client_host="127.0.0.1",
+        )
+        self.assertEqual(status, 200)
+
     def test_loopback_request_is_allowed(self) -> None:
         _require_local_settings_request(SimpleNamespace(client=SimpleNamespace(host="127.0.0.1")))
         _require_local_settings_request(SimpleNamespace(client=SimpleNamespace(host="::1")))

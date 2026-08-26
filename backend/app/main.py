@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .config import get_settings, normalize_kiwoom_base_url, public_kiwoom_settings, save_kiwoom_settings
@@ -33,6 +34,14 @@ from .services.ranking_service import InvestorRankingService
 app = FastAPI(title="YangRadar API", version="0.4.0")
 provider = DataProvider()
 ranking_service = InvestorRankingService(provider)
+_LOCAL_API_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+)
 _auto_scheduler_started = False
 _KST = ZoneInfo("Asia/Seoul")
 _AUTO_COLLECTION_TIME = datetime_time(15, 40)
@@ -74,18 +83,42 @@ def _require_local_settings_request(request: Request) -> None:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
+    allow_origins=list(_LOCAL_API_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _require_local_api_browser_request(request: Request) -> None:
+    """Reject browser-originated cross-site calls to the local API.
+
+    CORS controls whether a browser may read a response, but it does not stop
+    the request from reaching a loopback server.  Keep native clients (which
+    normally omit both headers) working while requiring browser origins to be
+    one of the local YangRadar frontend origins.
+    """
+    headers = getattr(request, "headers", {})
+    origin = (headers.get("origin") or "").strip()
+    if origin:
+        if origin not in _LOCAL_API_ORIGINS:
+            raise HTTPException(status_code=403, detail="허용되지 않은 브라우저 Origin입니다.")
+        return
+
+    fetch_site = (headers.get("sec-fetch-site") or "").strip().lower()
+    if fetch_site == "cross-site":
+        raise HTTPException(status_code=403, detail="외부 사이트에서의 API 요청은 허용되지 않습니다.")
+
+
+@app.middleware("http")
+async def local_api_browser_origin_guard(request: Request, call_next):
+    path = request.url.path
+    if path == "/api" or path.startswith("/api/"):
+        try:
+            _require_local_api_browser_request(request)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
 
 
 @app.on_event("startup")
