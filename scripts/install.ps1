@@ -21,7 +21,7 @@ if (-not (Test-Path ".venv")) {
   python -m venv .venv
 }
 
-& ".\.venv\Scripts\python.exe" -m pip install --upgrade pip
+& ".\.venv\Scripts\python.exe" -m pip install --upgrade "pip>=26.2" "setuptools>=83.0.0"
 & ".\.venv\Scripts\python.exe" -m pip install -r "backend\requirements.txt"
 & npm.cmd install --prefix frontend
 
