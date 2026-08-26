@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import math
 from unittest import TestCase
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from backend.app.config import Settings
-from backend.app.services.data_provider import KiwoomRestProvider, _ratio
+from backend.app.services import data_provider as data_provider_module
+from backend.app.services.data_provider import KiwoomApiError, KiwoomRestProvider, _ratio
 
 
 def _provider(response: dict) -> KiwoomRestProvider:
@@ -193,3 +194,160 @@ class InvestorHoldingConsistencyTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["foreign_holding_qty"])
         self.assertIsNone(rows[0]["foreign_holding_ratio"])
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleep_calls: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleep_calls.append(seconds)
+        self.now += seconds
+
+
+def _http_response(status_code: int, payload: dict | None = None) -> Mock:
+    response = Mock()
+    response.status_code = status_code
+    response.text = ""
+    response.json.return_value = payload or {"return_code": "0"}
+    return response
+
+
+class KiwoomRateLimitTests(TestCase):
+    def setUp(self) -> None:
+        self.previous_last_request_at = data_provider_module._kiwoom_last_request_at
+        data_provider_module._kiwoom_last_request_at = None
+        self.addCleanup(self._restore_rate_limiter)
+
+    def _restore_rate_limiter(self) -> None:
+        data_provider_module._kiwoom_last_request_at = self.previous_last_request_at
+
+    def _provider(
+        self,
+        *,
+        request_interval: float = 0.0,
+        rate_limit_retries: int = 3,
+        rate_limit_backoff: tuple[float, ...] = (1.0, 2.0, 4.0),
+    ) -> KiwoomRestProvider:
+        return KiwoomRestProvider(
+            Settings(
+                kiwoom_app_key="app",
+                kiwoom_secret_key="secret",
+                kiwoom_account_no="account",
+                kiwoom_env="mock",
+                kiwoom_base_url="https://mockapi.kiwoom.com",
+            ),
+            request_interval=request_interval,
+            rate_limit_retries=rate_limit_retries,
+            rate_limit_backoff=rate_limit_backoff,
+        )
+
+    def test_common_limiter_enforces_configured_interval_without_real_sleep(self) -> None:
+        clock = _FakeClock()
+        with patch.object(data_provider_module.time, "monotonic", side_effect=clock.monotonic), patch.object(
+            data_provider_module.time, "sleep", side_effect=clock.sleep
+        ):
+            data_provider_module._wait_for_kiwoom_request_slot(0.275)
+            data_provider_module._wait_for_kiwoom_request_slot(0.275)
+            data_provider_module._wait_for_kiwoom_request_slot(0.275)
+
+        self.assertEqual(clock.sleep_calls, [0.275, 0.275])
+
+    def test_different_provider_instances_and_trs_share_limiter(self) -> None:
+        clock = _FakeClock()
+        provider_a = self._provider(request_interval=0.275)
+        provider_b = self._provider(request_interval=0.275)
+        responses = [_http_response(200), _http_response(200), _http_response(200)]
+        with patch.object(data_provider_module.time, "monotonic", side_effect=clock.monotonic), patch.object(
+            data_provider_module.time, "sleep", side_effect=clock.sleep
+        ), patch.object(provider_a, "_token_value", return_value="token"), patch.object(
+            provider_b, "_token_value", return_value="token"
+        ), patch.object(data_provider_module.requests, "post", side_effect=responses) as post:
+            provider_a._post("/api/dostk/frgnistt", "ka10060", {"stk_cd": "005930"})
+            provider_b._post("/api/dostk/frgnistt", "ka10008", {"stk_cd": "005930"})
+            provider_a._post("/api/dostk/stkinfo", "ka10001", {"stk_cd": "005930"})
+
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(clock.sleep_calls, [0.275, 0.275])
+
+    def test_429_retries_then_returns_success(self) -> None:
+        clock = _FakeClock()
+        provider = self._provider(rate_limit_backoff=(1.0, 2.0, 4.0))
+        with patch.object(data_provider_module.time, "monotonic", side_effect=clock.monotonic), patch.object(
+            data_provider_module.time, "sleep", side_effect=clock.sleep
+        ), patch.object(provider, "_token_value", return_value="token"), patch.object(
+            data_provider_module.requests, "post", side_effect=[_http_response(429), _http_response(200)]
+        ) as post:
+            result = provider._post("/api/dostk/frgnistt", "ka10060", {"stk_cd": "005930"})
+
+        self.assertEqual(result, {"return_code": "0"})
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(clock.sleep_calls, [1.0])
+
+    def test_multiple_429_responses_use_exponential_backoff(self) -> None:
+        clock = _FakeClock()
+        provider = self._provider()
+        with patch.object(data_provider_module.time, "monotonic", side_effect=clock.monotonic), patch.object(
+            data_provider_module.time, "sleep", side_effect=clock.sleep
+        ), patch.object(provider, "_token_value", return_value="token"), patch.object(
+            data_provider_module.requests, "post", side_effect=[_http_response(429), _http_response(429), _http_response(200)]
+        ) as post:
+            result = provider._post("/api/dostk/frgnistt", "ka10008", {"stk_cd": "005930"})
+
+        self.assertEqual(result, {"return_code": "0"})
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(clock.sleep_calls, [1.0, 2.0])
+
+    def test_rate_limited_error_is_preserved_after_retry_budget(self) -> None:
+        clock = _FakeClock()
+        provider = self._provider()
+        with patch.object(data_provider_module.time, "monotonic", side_effect=clock.monotonic), patch.object(
+            data_provider_module.time, "sleep", side_effect=clock.sleep
+        ), patch.object(provider, "_token_value", return_value="token"), patch.object(
+            data_provider_module.requests,
+            "post",
+            side_effect=[_http_response(429), _http_response(429), _http_response(429), _http_response(429)],
+        ) as post:
+            with self.assertRaises(KiwoomApiError) as context:
+                provider._post("/api/dostk/frgnistt", "ka10060", {"stk_cd": "005930"})
+
+        self.assertEqual(context.exception.code, "rate_limited")
+        self.assertEqual(context.exception.message, "키움 요청 제한에 걸렸습니다.")
+        self.assertEqual(post.call_count, 4)
+        self.assertEqual(clock.sleep_calls, [1.0, 2.0, 4.0])
+
+    def test_non_429_error_is_not_retried(self) -> None:
+        clock = _FakeClock()
+        provider = self._provider()
+        with patch.object(data_provider_module.time, "monotonic", side_effect=clock.monotonic), patch.object(
+            data_provider_module.time, "sleep", side_effect=clock.sleep
+        ), patch.object(provider, "_token_value", return_value="token"), patch.object(
+            data_provider_module.requests, "post", return_value=_http_response(500, {"return_msg": "server error"})
+        ) as post:
+            with self.assertRaises(KiwoomApiError) as context:
+                provider._post("/api/dostk/frgnistt", "ka10060", {"stk_cd": "005930"})
+
+        self.assertEqual(context.exception.code, "api_error")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(clock.sleep_calls, [])
+
+    def test_401_behavior_remains_token_expired_without_retry(self) -> None:
+        clock = _FakeClock()
+        provider = self._provider()
+        provider._token = "cached-token"
+        with patch.object(data_provider_module.time, "monotonic", side_effect=clock.monotonic), patch.object(
+            data_provider_module.time, "sleep", side_effect=clock.sleep
+        ), patch.object(provider, "_token_value", return_value="token"), patch.object(
+            data_provider_module.requests, "post", return_value=_http_response(401)
+        ) as post:
+            with self.assertRaises(KiwoomApiError) as context:
+                provider._post("/api/dostk/frgnistt", "ka10060", {"stk_cd": "005930"})
+
+        self.assertEqual(context.exception.code, "token_expired")
+        self.assertIsNone(provider._token)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(clock.sleep_calls, [])

@@ -2,12 +2,40 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import math
+import threading
+import time
 from typing import Any
 
 import requests
 
 from ..config import Settings, get_settings
 from .stock_universe import LOCAL_STOCKS, local_stock
+
+
+DEFAULT_KIWOOM_REQUEST_INTERVAL = 0.275
+DEFAULT_KIWOOM_RATE_LIMIT_RETRIES = 3
+DEFAULT_KIWOOM_RATE_LIMIT_BACKOFF = (1.0, 2.0, 4.0)
+
+_kiwoom_rate_limit_lock = threading.Lock()
+_kiwoom_last_request_at: float | None = None
+
+
+def _wait_for_kiwoom_request_slot(interval: float) -> None:
+    """Reserve the next process-wide Kiwoom TR request slot.
+
+    The lock is held only while calculating the delay and recording the actual
+    send time.  HTTP response time is not included, so a slow request does not
+    block other threads from calculating their next slot unnecessarily.
+    """
+    global _kiwoom_last_request_at
+
+    with _kiwoom_rate_limit_lock:
+        now = time.monotonic()
+        if _kiwoom_last_request_at is not None:
+            wait = interval - (now - _kiwoom_last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+        _kiwoom_last_request_at = time.monotonic()
 
 
 class KiwoomApiError(Exception):
@@ -18,10 +46,21 @@ class KiwoomApiError(Exception):
 
 
 class KiwoomRestProvider:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        request_interval: float = DEFAULT_KIWOOM_REQUEST_INTERVAL,
+        rate_limit_retries: int = DEFAULT_KIWOOM_RATE_LIMIT_RETRIES,
+        rate_limit_backoff: tuple[float, ...] = DEFAULT_KIWOOM_RATE_LIMIT_BACKOFF,
+    ):
         self.settings = settings or get_settings()
         self._token: str | None = None
         self._token_expires_at: datetime | None = None
+        self._request_interval = max(0.0, float(request_interval))
+        self._rate_limit_retries = max(0, int(rate_limit_retries))
+        normalized_backoff = tuple(max(0.0, float(delay)) for delay in rate_limit_backoff)
+        self._rate_limit_backoff = normalized_backoff or DEFAULT_KIWOOM_RATE_LIMIT_BACKOFF
 
     @property
     def configured(self) -> bool:
@@ -612,31 +651,39 @@ class KiwoomRestProvider:
 
     def _post(self, endpoint: str, api_id: str, body: dict[str, Any]) -> dict[str, Any]:
         token = self._token_value()
-        try:
-            response = requests.post(
-                f"{self.settings.kiwoom_base_url}{endpoint}",
-                json=body,
-                headers={
-                    "Content-Type": "application/json;charset=UTF-8",
-                    "authorization": f"Bearer {token}",
-                    "api-id": api_id,
-                    "cont-yn": "N",
-                    "next-key": "",
-                },
-                timeout=10,
-            )
-        except requests.RequestException as exc:
-            raise KiwoomApiError("network_error", f"{api_id} 요청 실패: {exc}") from exc
-        data = _response_json(response)
-        if response.status_code == 401:
-            self._token = None
-            self._token_expires_at = None
-            raise KiwoomApiError("token_expired", "키움 접근토큰이 만료되었거나 거부되었습니다.")
-        if response.status_code == 429:
-            raise KiwoomApiError("rate_limited", "키움 요청 제한에 걸렸습니다.")
-        if response.status_code >= 400 or str(data.get("return_code", "0")) not in {"0", ""}:
-            raise KiwoomApiError("api_error", data.get("return_msg") or f"{api_id} HTTP {response.status_code}")
-        return data
+        for retry_index in range(self._rate_limit_retries + 1):
+            _wait_for_kiwoom_request_slot(self._request_interval)
+            try:
+                response = requests.post(
+                    f"{self.settings.kiwoom_base_url}{endpoint}",
+                    json=body,
+                    headers={
+                        "Content-Type": "application/json;charset=UTF-8",
+                        "authorization": f"Bearer {token}",
+                        "api-id": api_id,
+                        "cont-yn": "N",
+                        "next-key": "",
+                    },
+                    timeout=10,
+                )
+            except requests.RequestException as exc:
+                raise KiwoomApiError("network_error", f"{api_id} 요청 실패: {exc}") from exc
+            data = _response_json(response)
+            if response.status_code == 401:
+                self._token = None
+                self._token_expires_at = None
+                raise KiwoomApiError("token_expired", "키움 접근토큰이 만료되었거나 거부되었습니다.")
+            if response.status_code == 429:
+                if retry_index >= self._rate_limit_retries:
+                    raise KiwoomApiError("rate_limited", "키움 요청 제한에 걸렸습니다.")
+                backoff_index = min(retry_index, len(self._rate_limit_backoff) - 1)
+                time.sleep(self._rate_limit_backoff[backoff_index])
+                continue
+            if response.status_code >= 400 or str(data.get("return_code", "0")) not in {"0", ""}:
+                raise KiwoomApiError("api_error", data.get("return_msg") or f"{api_id} HTTP {response.status_code}")
+            return data
+
+        raise KiwoomApiError("rate_limited", "키움 요청 제한에 걸렸습니다.")
 
     def _parse_stock_list(self, data: dict[str, Any], fallback_market: str = "KRX") -> list[dict[str, Any]]:
         rows = _find_first_list(data, ["list", "stk_info", "result_list", "output", "items"])
