@@ -27,6 +27,38 @@ def _investor_row(date: str, foreign: str = "10", institution: str = "5", **extr
     return {"dt": date, "frgnr_invsr": foreign, "orgn": institution, **extra}
 
 
+class PriceChartTradingValueUnitTests(TestCase):
+    def _chart_response(self, **row_overrides: str) -> dict:
+        row = {
+            "dt": "20260826",
+            "cur_prc": "100000",
+            "trde_qty": "10000",
+            **row_overrides,
+        }
+        return {"stk_dt_pole_chart_qry": [row]}
+
+    def test_api_trading_value_is_preserved_in_million_won(self) -> None:
+        provider = _provider(self._chart_response(trde_prica="1234"))
+
+        rows = provider._get_price_chart("005930", 10, "daily")
+
+        self.assertEqual(rows[0]["trading_value"], 1234)
+
+    def test_missing_trading_value_falls_back_to_million_won(self) -> None:
+        provider = _provider(self._chart_response())
+
+        rows = provider._get_price_chart("005930", 10, "daily")
+
+        self.assertEqual(rows[0]["trading_value"], 1000)
+
+    def test_explicit_zero_trading_value_does_not_use_fallback(self) -> None:
+        provider = _provider(self._chart_response(trde_prica="0"))
+
+        rows = provider._get_price_chart("005930", 10, "daily")
+
+        self.assertEqual(rows[0]["trading_value"], 0)
+
+
 class InvestorDateSelectionTests(TestCase):
     def test_exact_date_is_selected(self) -> None:
         provider = _provider(

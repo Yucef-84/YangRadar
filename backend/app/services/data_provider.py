@@ -414,6 +414,9 @@ class KiwoomRestProvider:
             volume = _to_abs_number(_first(row, ["trde_qty", "acml_vol", "volume"])) or 0
             if not date or close is None:
                 continue
+            trading_value = _to_abs_number(_first(row, ["trde_prica", "acml_tr_pbmn", "trading_value"]))
+            if trading_value is None:
+                trading_value = (close * volume) / 1_000_000
             parsed.append(
                 {
                     "date": date,
@@ -422,7 +425,7 @@ class KiwoomRestProvider:
                     "low": _to_abs_number(_first(row, ["low_pric", "stck_lwpr", "low"])) or close,
                     "close": close,
                     "volume": volume,
-                    "trading_value": _to_abs_number(_first(row, ["trde_prica", "acml_tr_pbmn", "trading_value"])) or close * volume,
+                    "trading_value": trading_value,
                 }
             )
         parsed.sort(key=lambda item: item["date"])
