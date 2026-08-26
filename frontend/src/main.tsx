@@ -397,7 +397,6 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
     try {
       const next = await getInvestorRanking({ date: date || undefined, metric, direction, market, assetType });
       setResponse(next);
-      if (!date && next.date) setDate(next.date);
     } catch (err) {
       setError(err instanceof Error ? err.message : "수급 순위를 불러오지 못했습니다.");
     } finally {
@@ -423,7 +422,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
       }).catch(() => undefined);
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [jobStatus?.job.status]);
+  }, [jobStatus?.job.status, date, metric, direction, market, assetType]);
 
   useEffect(() => {
     try {
@@ -479,7 +478,7 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
   const items = response?.items ?? [];
   const dataQuality = response?.data_quality;
   const availableDates = response?.dates ?? jobStatus?.dates ?? [];
-  const selectedDate = (response?.date ?? date) || availableDates[0];
+  const selectedDate = response?.date;
   const previousDate = selectedDate ? availableDates.find((candidate) => candidate < selectedDate) : undefined;
   const sortedItems = useMemo(() => sortRankingItems(items, sortState), [items, sortState]);
   const rankingTableWidth = rankingColumns.reduce((sum, column) => sum + columnWidths[column.key], 0);
@@ -507,11 +506,8 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
               </small>
             )}
           </div>
-          <div className="ranking-job-actions">
-            <button type="button" onClick={() => void handleRefresh()} disabled={refreshing || job?.status === "running"}>
-              {refreshing || job?.status === "running" ? "수집 중" : "전체 수급 갱신"}
-            </button>
-            {showRetry && retryTargetDate && (
+          {showRetry && retryTargetDate && (
+            <div className="ranking-job-actions">
               <button
                 type="button"
                 className="ranking-retry-button"
@@ -520,13 +516,13 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
               >
                 {retrying ? "재시도 중" : job.failed > 0 ? `실패 ${job.failed.toLocaleString("ko-KR")}개 재시도` : "실패 수집 재시도"}
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
 
       <div className="ranking-filters panel">
-        <label><span>기준일</span><select value={date} onChange={(event) => setDate(event.target.value)}>
+        <label><span>조회 기준일</span><select value={date} onChange={(event) => setDate(event.target.value)}>
           <option value="">최신 거래일</option>
           {(response?.dates ?? jobStatus?.dates ?? []).map((item) => <option key={item} value={item}>{item}</option>)}
         </select></label>
@@ -549,15 +545,28 @@ function InvestorRankingView({ onSelectStock }: { onSelectStock: (code: string) 
           <option value="STOCK">주식만</option>
           <option value="ETF">ETF만</option>
         </select></label>
-        <label className="ranking-collect-date"><span>수집 요청일 · 비우면 오늘</span><input type="date" value={collectionDate} onChange={(event) => setCollectionDate(event.target.value)} /></label>
+      </div>
+
+      <div className="ranking-collection panel">
+        <div className="ranking-collection-copy">
+          <strong>수동 데이터 수집</strong>
+          <span>조회 기준일과 별개로 전체 종목 수급 데이터를 요청합니다. 비우면 오늘을 요청합니다.</span>
+        </div>
+        <label className="ranking-collect-date">
+          <span>수집 요청일</span>
+          <input type="date" value={collectionDate} onChange={(event) => setCollectionDate(event.target.value)} />
+        </label>
+        <button type="button" onClick={() => void handleRefresh()} disabled={refreshing || job?.status === "running"}>
+          {refreshing || job?.status === "running" ? "수집 중" : "전체 수급 갱신"}
+        </button>
       </div>
 
       {availableDates.length > 0 && (
         <div className="ranking-note panel">
-          <span>현재 기준일: <strong>{selectedDate ?? "-"}</strong></span>
+          <span>현재 표시 기준일: <strong>{selectedDate ?? "-"}</strong></span>
           {previousDate
             ? <span>전일 비교 기준: <strong>{previousDate}</strong></span>
-            : <span>이전 기준일 데이터가 없어 전일 순위는 `신규`로 표시됩니다. 수집 요청일을 바꿔 과거 거래일을 추가할 수 있습니다.</span>}
+            : <span>이전 기준일 데이터가 없어 전일 순위는 `신규`로 표시됩니다. 수동 데이터 수집에서 요청일을 지정해 과거 거래일을 추가할 수 있습니다.</span>}
           <span>열 경계와 각 행 하단의 손잡이를 마우스로 드래그해 표를 조절할 수 있습니다.</span>
         </div>
       )}

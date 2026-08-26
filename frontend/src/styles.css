@@ -258,13 +258,60 @@ button:disabled { opacity: 0.55; cursor: wait; }
   background: white;
 }
 
-.ranking-collect-date input {
+.ranking-collection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
+  padding: 7px 9px;
+}
+
+.ranking-collection-copy {
+  min-width: 240px;
+  flex: 1 1 320px;
+  display: grid;
+  gap: 2px;
+}
+
+.ranking-collection-copy strong {
+  color: #315f99;
+  font-size: 12px;
+}
+
+.ranking-collection-copy span,
+.ranking-collection label span {
+  color: #526170;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ranking-collection label {
+  display: grid;
+  gap: 3px;
+  min-width: 145px;
+}
+
+.ranking-collection input {
   height: 28px;
-  min-width: 135px;
+  min-width: 145px;
   padding: 0 7px;
   border: 1px solid #9aa9b9;
   background: white;
   color: #1c2530;
+}
+
+.ranking-collection > button {
+  height: 28px;
+  min-width: 128px;
+  padding: 0 10px;
+  color: white;
+  background: #315f99;
+  border-color: #214d82;
+  font-weight: 700;
+}
+
+.ranking-collection > button:hover {
+  background: #214d82;
 }
 
 .ranking-loading {
@@ -1114,9 +1161,20 @@ td:first-child, th:first-child { text-align: center; }
 
   .ranking-filters label,
   .ranking-filters select,
-  .ranking-collect-date input {
+  .ranking-collection label,
+  .ranking-collection input,
+  .ranking-collection > button {
     width: 100%;
     min-width: 0;
+  }
+
+  .ranking-collection {
+    align-items: stretch;
+  }
+
+  .ranking-collection-copy {
+    min-width: 0;
+    flex-basis: 100%;
   }
 
   .ranking-job {
