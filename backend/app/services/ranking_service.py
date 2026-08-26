@@ -46,7 +46,11 @@ class InvestorRankingService:
 
             from ..database import upsert_stocks
 
-            upsert_stocks(stocks, datetime.now().isoformat(timespec="seconds"))
+            upsert_stocks(
+                stocks,
+                datetime.now().isoformat(timespec="seconds"),
+                complete=stock_quality.get("complete") is True,
+            )
             total = len(stocks)
             existing_codes = get_investor_codes(target_date)
             pending_stocks = [stock for stock in stocks if str(stock.get("code") or "").zfill(6) not in existing_codes]

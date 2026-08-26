@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+import ipaddress
 import re
 import time
 from threading import Thread
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .config import public_kiwoom_settings, save_kiwoom_settings
+from .config import get_settings, normalize_kiwoom_base_url, public_kiwoom_settings, save_kiwoom_settings
 from .database import (
     get_cached_dashboard,
     get_cached_stock,
@@ -42,6 +43,20 @@ class KiwoomSettingsPayload(BaseModel):
     base_url: str = ""
 
 
+def _require_local_settings_request(request: Request) -> None:
+    """Keep credential-management endpoints available only to the local app."""
+    host = (request.client.host if request.client else "") or ""
+    headers = getattr(request, "headers", {})
+    if headers.get("x-forwarded-for") or headers.get("forwarded"):
+        raise HTTPException(status_code=403, detail="프록시를 통한 키움 설정 요청은 허용하지 않습니다.")
+    try:
+        is_loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = host.lower() == "localhost"
+    if not is_loopback:
+        raise HTTPException(status_code=403, detail="키움 설정은 YangRadar를 실행한 PC에서만 변경할 수 있습니다.")
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -62,8 +77,8 @@ app.add_middleware(
 def startup() -> None:
     global _auto_scheduler_started
     init_db()
-    stocks, _quality = provider.list_stocks()
-    upsert_stocks(stocks, datetime.now().isoformat(timespec="seconds"))
+    stocks, quality = provider.list_stocks()
+    upsert_stocks(stocks, datetime.now().isoformat(timespec="seconds"), complete=quality.get("complete") is True)
     if _should_auto_collect_rankings():
         ranking_service.start(datetime.now().date().isoformat())
     if not _auto_scheduler_started:
@@ -77,24 +92,31 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/api/settings/kiwoom")
-def get_kiwoom_settings() -> dict[str, Any]:
+def get_kiwoom_settings(request: Request) -> dict[str, Any]:
+    _require_local_settings_request(request)
     return public_kiwoom_settings()
 
 
 @app.post("/api/settings/kiwoom")
-def update_kiwoom_settings(payload: KiwoomSettingsPayload) -> dict[str, Any]:
+def update_kiwoom_settings(payload: KiwoomSettingsPayload, request: Request) -> dict[str, Any]:
     global provider, ranking_service
+    _require_local_settings_request(request)
     env = payload.env.strip().lower() or "real"
     if env not in {"real", "mock"}:
         raise HTTPException(status_code=400, detail="KIWOOM_ENV는 real 또는 mock이어야 합니다.")
     if not payload.app_key.strip() or not payload.secret_key.strip():
         raise HTTPException(status_code=400, detail="앱키와 시크릿키를 모두 입력해야 합니다.")
+    try:
+        base_url = normalize_kiwoom_base_url(env, payload.base_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    current = get_settings()
     save_kiwoom_settings(
         app_key=payload.app_key,
         secret_key=payload.secret_key,
-        account_no=payload.account_no,
+        account_no=payload.account_no.strip() or current.kiwoom_account_no,
         env=env,
-        base_url=payload.base_url,
+        base_url=base_url,
     )
     provider = DataProvider()
     ranking_service = InvestorRankingService(provider)
@@ -102,7 +124,8 @@ def update_kiwoom_settings(payload: KiwoomSettingsPayload) -> dict[str, Any]:
 
 
 @app.post("/api/settings/kiwoom/test-auth")
-def test_kiwoom_auth() -> dict[str, Any]:
+def test_kiwoom_auth(request: Request) -> dict[str, Any]:
+    _require_local_settings_request(request)
     return provider.test_auth()
 
 
@@ -112,7 +135,7 @@ def search(q: str = "") -> dict[str, Any]:
     if not query:
         return {"items": [], "data_quality": {"status": "empty_query", "message": "검색어를 입력하세요."}}
     stocks, quality = provider.list_stocks()
-    upsert_stocks(stocks, datetime.now().isoformat(timespec="seconds"))
+    upsert_stocks(stocks, datetime.now().isoformat(timespec="seconds"), complete=quality.get("complete") is True)
     return {"items": search_cached_stocks(query), "data_quality": quality}
 
 

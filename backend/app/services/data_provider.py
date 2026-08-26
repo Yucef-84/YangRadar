@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import math
 from typing import Any
 
 import requests
@@ -69,7 +70,11 @@ class KiwoomRestProvider:
             for market_code, fallback_market in market_requests:
                 try:
                     data = self._post("/api/dostk/stkinfo", "ka10099", {"mrkt_tp": market_code})
-                    stocks.extend(self._parse_stock_list(data, fallback_market))
+                    market_stocks = self._parse_stock_list(data, fallback_market)
+                    if not market_stocks:
+                        messages.append(f"{fallback_market}: 종목 목록이 비어 있습니다.")
+                        continue
+                    stocks.extend(market_stocks)
                 except KiwoomApiError as exc:
                     messages.append(f"{fallback_market}: {exc.message}")
 
@@ -82,6 +87,7 @@ class KiwoomRestProvider:
             stocks = sorted(deduped.values(), key=lambda item: (item["market"], item["name"], item["code"]))
             if stocks:
                 quality = self._quality("stock_list", "ok" if not messages else "partial", "키움 REST 종목 목록을 수신했습니다.")
+                quality["complete"] = not messages
                 if messages:
                     quality["message"] += " 일부 시장은 실패했습니다: " + " / ".join(messages)
                 return stocks, quality
@@ -123,7 +129,10 @@ class KiwoomRestProvider:
                 holding: dict[str, Any] = {}
                 if include_holdings:
                     try:
-                        holding = self._get_foreign_holding(code, target_date) or {}
+                        holding = self._get_foreign_holding(code, investor["date"]) or {}
+                        if holding.get("date") != investor["date"]:
+                            # Do not combine a holding snapshot from another day with the flow row.
+                            holding = {}
                     except KiwoomApiError:
                         # Holding-rate data is supplementary; daily flow can still be ranked.
                         holding = {}
@@ -137,9 +146,9 @@ class KiwoomRestProvider:
                     "listed_shares": listed_shares,
                     "market_cap": market_cap,
                     "foreign_net_qty": foreign_qty,
-                    "foreign_net_value": investor.get("foreign_value") or 0,
+                    "foreign_net_value": investor.get("foreign_value"),
                     "institution_net_qty": institution_qty,
-                    "institution_net_value": investor.get("institution_value") or 0,
+                    "institution_net_value": investor.get("institution_value"),
                     "foreign_change_ratio": _ratio(foreign_qty, listed_shares),
                     "institution_change_ratio": _ratio(institution_qty, listed_shares),
                     "combined_change_ratio": _ratio(foreign_qty + institution_qty, listed_shares),
@@ -326,10 +335,14 @@ class KiwoomRestProvider:
         for row in value_rows:
             target = by_date.setdefault(
                 row["date"],
-                {"date": row["date"], "foreign_qty": 0, "foreign_value": 0, "institution_qty": 0, "institution_value": 0},
+                {"date": row["date"], "foreign_qty": None, "foreign_value": None, "institution_qty": None, "institution_value": None},
             )
-            target["foreign_value"] = row["foreign_qty"] or row["foreign_value"]
-            target["institution_value"] = row["institution_qty"] or row["institution_value"]
+            target["foreign_value"] = (
+                row["foreign_qty"] if row["foreign_qty"] is not None else row["foreign_value"]
+            )
+            target["institution_value"] = (
+                row["institution_qty"] if row["institution_qty"] is not None else row["institution_value"]
+            )
 
         parsed = list(by_date.values())
         parsed.sort(key=lambda item: item["date"])
@@ -344,10 +357,12 @@ class KiwoomRestProvider:
         qty_rows = self._parse_investor_rows(data)
         if not qty_rows:
             return None
+        qty_rows.sort(key=lambda item: item["date"])
         target = next((row for row in qty_rows if row["date"] == target_date), None)
         if target is None:
-            eligible = [row for row in qty_rows if row["date"] <= target_date]
-            target = eligible[-1] if eligible else qty_rows[-1]
+            target = _latest_on_or_before(qty_rows, target_date)
+        if target is None:
+            return None
         if include_values:
             try:
                 value_data = self._post(
@@ -360,8 +375,16 @@ class KiwoomRestProvider:
                 if value:
                     target = {
                         **target,
-                        "foreign_value": value.get("foreign_qty") or value.get("foreign_value") or 0,
-                        "institution_value": value.get("institution_qty") or value.get("institution_value") or 0,
+                        "foreign_value": (
+                            value.get("foreign_qty")
+                            if value.get("foreign_qty") is not None
+                            else value.get("foreign_value")
+                        ),
+                        "institution_value": (
+                            value.get("institution_qty")
+                            if value.get("institution_qty") is not None
+                            else value.get("institution_value")
+                        ),
                     }
             except KiwoomApiError:
                 pass
@@ -385,7 +408,8 @@ class KiwoomRestProvider:
         if not parsed:
             return None
         parsed.sort(key=lambda item: item["date"])
-        return next((row for row in parsed if row["date"] == target_date), parsed[-1])
+        target = next((row for row in parsed if row["date"] == target_date), None)
+        return target if target is not None else _latest_on_or_before(parsed, target_date)
 
     def _parse_investor_rows(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         rows = _find_first_list(data, ["stk_invsr_orgn_chart", "output", "list"])
@@ -394,28 +418,27 @@ class KiwoomRestProvider:
             date = _format_date(_first(row, ["dt", "date"]))
             if not date:
                 continue
+            foreign_qty = _number_from_keys(
+                row,
+                ["frgnr_invsr", "frgnr_netprps_qty", "for_netprps_qty", "frgnr", "frgn", "frgnr_trde_qty", "foreign_qty"],
+            )
+            institution_qty = _number_from_keys(
+                row,
+                ["orgn", "orgn_netprps_qty", "inst_netprps_qty", "inst", "orgn_trde_qty", "institution_qty"],
+            )
+            if foreign_qty is None or institution_qty is None:
+                continue
             parsed.append(
                 {
                     "date": date,
-                    "foreign_qty": _to_number(
-                        _first(
-                            row,
-                            ["frgnr_invsr", "frgnr_netprps_qty", "for_netprps_qty", "frgnr", "frgn", "frgnr_trde_qty", "foreign_qty"],
-                        )
-                    )
-                    or 0,
-                    "foreign_value": _to_number(
-                        _first(row, ["frgnr_netprps_amt", "frgnr_trde_amt", "for_netprps_amt", "frgn_amt", "foreign_value"])
-                    )
-                    or 0,
-                    "institution_qty": _to_number(
-                        _first(row, ["orgn", "orgn_netprps_qty", "inst_netprps_qty", "inst", "orgn_trde_qty", "institution_qty"])
-                    )
-                    or 0,
-                    "institution_value": _to_number(
-                        _first(row, ["orgn_netprps_amt", "inst_netprps_amt", "orgn_trde_amt", "inst_amt", "institution_value"])
-                    )
-                    or 0,
+                    "foreign_qty": foreign_qty,
+                    "foreign_value": _number_from_keys(
+                        row, ["frgnr_netprps_amt", "frgnr_trde_amt", "for_netprps_amt", "frgn_amt", "foreign_value"]
+                    ),
+                    "institution_qty": institution_qty,
+                    "institution_value": _number_from_keys(
+                        row, ["orgn_netprps_amt", "inst_netprps_amt", "orgn_trde_amt", "inst_amt", "institution_value"]
+                    ),
                     "foreign_holding_qty": _to_abs_number(
                         _first(row, ["poss_stkcnt", "foreign_holding_qty", "frgnr_poss_stkcnt"])
                     ),
@@ -731,6 +754,25 @@ def _first(row: dict[str, Any], keys: list[str]) -> Any:
     return None
 
 
+def _number_from_keys(row: dict[str, Any], keys: list[str]) -> float | None:
+    """Parse the first usable numeric field without turning missing data into zero."""
+    for key in keys:
+        if key not in row:
+            continue
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        number = _to_number(value)
+        if number is not None:
+            return number
+    return None
+
+
+def _latest_on_or_before(rows: list[dict[str, Any]], target_date: str) -> dict[str, Any] | None:
+    eligible = [row for row in rows if row.get("date") and row["date"] <= target_date]
+    return eligible[-1] if eligible else None
+
+
 def _to_number(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -738,9 +780,10 @@ def _to_number(value: Any) -> float | None:
     if cleaned.startswith("--"):
         cleaned = cleaned[1:]
     try:
-        return float(cleaned)
+        number = float(cleaned)
     except ValueError:
         return None
+    return number if math.isfinite(number) else None
 
 
 def _to_abs_number(value: Any) -> float | None:

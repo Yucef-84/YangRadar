@@ -610,7 +610,7 @@ function SettingsDialog({
   const [form, setForm] = useState<KiwoomSettingsPayload>({
     app_key: "",
     secret_key: "",
-    account_no: current?.account_no ?? "",
+    account_no: "",
     env: current?.env ?? "real",
     base_url: "",
   });
@@ -668,6 +668,7 @@ function SettingsDialog({
           <span className={current?.configured ? "dot ok-dot" : "dot warn-dot"} />
           {current?.configured ? "저장된 키가 있습니다." : "아직 저장된 키가 없습니다."}
           {current?.app_key_masked && <em>앱키 {current.app_key_masked}</em>}
+          {current?.account_no && <em>계좌 {current.account_no}</em>}
           {current?.base_url && <em>{current.env} {current.base_url}</em>}
         </div>
 
@@ -682,7 +683,7 @@ function SettingsDialog({
           </label>
           <label>
             <span>계좌번호</span>
-            <input value={form.account_no} onChange={(event) => setForm({ ...form, account_no: event.target.value })} placeholder="선택 입력" autoComplete="off" />
+            <input value={form.account_no} onChange={(event) => setForm({ ...form, account_no: event.target.value })} placeholder={current?.account_no ? "변경 시 입력 (기존 유지)" : "선택 입력"} autoComplete="off" />
           </label>
           <label>
             <span>환경</span>

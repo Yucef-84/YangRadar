@@ -15,6 +15,11 @@ KIWOOM_ENV_KEYS = [
     "KIWOOM_BASE_URL",
 ]
 
+KIWOOM_BASE_URLS = {
+    "real": "https://api.kiwoom.com",
+    "mock": "https://mockapi.kiwoom.com",
+}
+
 
 def read_dotenv(path: Path | None = None) -> dict[str, str]:
     env_path = path or ENV_PATH
@@ -45,19 +50,18 @@ def save_kiwoom_settings(
     path: Path | None = None,
 ) -> None:
     env_path = path or ENV_PATH
+    normalized_env = env.strip().lower() or "real"
+    normalized_base_url = normalize_kiwoom_base_url(normalized_env, base_url)
     existing = read_dotenv(env_path)
     existing.update(
         {
             "KIWOOM_APP_KEY": app_key.strip(),
             "KIWOOM_SECRET_KEY": secret_key.strip(),
             "KIWOOM_ACCOUNT_NO": account_no.strip(),
-            "KIWOOM_ENV": env.strip().lower() or "real",
+            "KIWOOM_ENV": normalized_env,
         }
     )
-    if base_url.strip():
-        existing["KIWOOM_BASE_URL"] = base_url.strip().rstrip("/")
-    else:
-        existing.pop("KIWOOM_BASE_URL", None)
+    existing["KIWOOM_BASE_URL"] = normalized_base_url
 
     lines = [
         "# Kiwoom REST API settings.",
@@ -89,14 +93,34 @@ def get_settings() -> Settings:
         return os.getenv(key, file_values.get(key, default)).strip()
 
     env = value("KIWOOM_ENV", "real").lower()
-    default_base_url = "https://mockapi.kiwoom.com" if env == "mock" else "https://api.kiwoom.com"
+    if env not in KIWOOM_BASE_URLS:
+        env = "real"
+    default_base_url = KIWOOM_BASE_URLS[env]
+    configured_base_url = value("KIWOOM_BASE_URL")
+    try:
+        safe_base_url = normalize_kiwoom_base_url(env, configured_base_url or default_base_url)
+    except ValueError:
+        safe_base_url = default_base_url
     return Settings(
         kiwoom_app_key=value("KIWOOM_APP_KEY"),
         kiwoom_secret_key=value("KIWOOM_SECRET_KEY"),
         kiwoom_account_no=value("KIWOOM_ACCOUNT_NO"),
         kiwoom_env=env,
-        kiwoom_base_url=value("KIWOOM_BASE_URL", default_base_url).rstrip("/"),
+        kiwoom_base_url=safe_base_url,
     )
+
+
+def normalize_kiwoom_base_url(env: str, base_url: str = "") -> str:
+    """Return only an official Kiwoom host for the selected environment."""
+    normalized_env = env.strip().lower() or "real"
+    if normalized_env not in KIWOOM_BASE_URLS:
+        raise ValueError("KIWOOM_ENV는 real 또는 mock이어야 합니다.")
+    candidate = base_url.strip().rstrip("/")
+    if not candidate:
+        return KIWOOM_BASE_URLS[normalized_env]
+    if candidate != KIWOOM_BASE_URLS[normalized_env]:
+        raise ValueError("KIWOOM_BASE_URL은 선택한 환경의 공식 Kiwoom 주소만 사용할 수 있습니다.")
+    return candidate
 
 
 def public_kiwoom_settings() -> dict[str, str | bool]:
@@ -105,7 +129,7 @@ def public_kiwoom_settings() -> dict[str, str | bool]:
         "configured": settings.kiwoom_configured,
         "app_key_masked": _mask(settings.kiwoom_app_key),
         "secret_key_masked": _mask(settings.kiwoom_secret_key),
-        "account_no": settings.kiwoom_account_no,
+        "account_no": _mask(settings.kiwoom_account_no),
         "env": settings.kiwoom_env,
         "base_url": settings.kiwoom_base_url,
         "stored_locally": ENV_PATH.exists(),

@@ -125,7 +125,7 @@ def save_dashboard(code: str, payload: dict[str, Any], updated_at: str) -> None:
         )
 
 
-def upsert_stocks(stocks: list[dict[str, Any]], updated_at: str) -> None:
+def upsert_stocks(stocks: list[dict[str, Any]], updated_at: str, *, complete: bool = False) -> None:
     if not stocks:
         return
     with connect() as conn:
@@ -143,7 +143,7 @@ def upsert_stocks(stocks: list[dict[str, Any]], updated_at: str) -> None:
             """,
             [{"security_type": "STOCK", **stock, "updated_at": updated_at} for stock in stocks],
         )
-        if len(stocks) > 3000:
+        if complete:
             conn.execute("delete from stocks where updated_at <> ?", (updated_at,))
 
 
